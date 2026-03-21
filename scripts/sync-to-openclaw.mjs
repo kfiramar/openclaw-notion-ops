@@ -10,6 +10,8 @@ const repoRoot = path.resolve(__dirname, "..");
 
 const workspaceRoot =
   process.env.OPENCLAW_WORKSPACE || "/docker/openclaw-pma3/data/.openclaw/workspace-personal";
+const workspaceRootInContainer =
+  process.env.OPENCLAW_WORKSPACE_IN_CONTAINER || "/data/.openclaw/workspace-personal";
 const container = process.env.OPENCLAW_CONTAINER || "openclaw-pma3-openclaw-1";
 const notionApiPath =
   process.env.NOTION_API_PATH || "/data/.openclaw/skills/notion-api/scripts/notion-api.mjs";
@@ -23,8 +25,8 @@ const targetLib = path.join(workspaceRoot, "lifestyle-ops-lib");
 const sourceEntrypoint = path.join(repoRoot, "notion-board-ops.mjs");
 const targetEntrypoint = path.join(workspaceRoot, "lifestyle-ops.mjs");
 const targetConfig = path.join(targetLib, "config.mjs");
-const targetBoard = path.join(workspaceRoot, "LIFESTYLE_BOARD.json");
-const targetHistory = path.join(workspaceRoot, "history");
+const targetBoardInContainer = path.posix.join(workspaceRootInContainer, "LIFESTYLE_BOARD.json");
+const targetHistoryInContainer = path.posix.join(workspaceRootInContainer, "history");
 
 const checkOnly = process.argv.includes("--check");
 
@@ -55,8 +57,8 @@ export const NOTION_API = ${JSON.stringify(notionApiPath)};
 export const MIRROR_ROOT = ${JSON.stringify(mirrorRoot)};
 export const MIRROR_SYNC = ${JSON.stringify(mirrorSyncPath)};
 export const MIRROR_SYNC_MATCH = \`node \${MIRROR_SYNC} --root \${MIRROR_ROOT}\`;
-export const BOARD_PATH = ${JSON.stringify(targetBoard)};
-export const HISTORY_ROOT = ${JSON.stringify(targetHistory)};
+export const BOARD_PATH = ${JSON.stringify(targetBoardInContainer)};
+export const HISTORY_ROOT = ${JSON.stringify(targetHistoryInContainer)};
 export const COMPLETIONS_ROOT = \`\${HISTORY_ROOT}/completions\`;
 
 export const TASK_FIELDS = {

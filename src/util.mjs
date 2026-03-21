@@ -167,6 +167,13 @@ export function monthEnd(base) {
   return value.toISOString().slice(0, 10);
 }
 
+export function diffDays(later, earlier) {
+  const laterTs = Date.parse(later);
+  const earlierTs = Date.parse(earlier);
+  if (Number.isNaN(laterTs) || Number.isNaN(earlierTs)) return null;
+  return Math.floor((laterTs - earlierTs) / 86400000);
+}
+
 export function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

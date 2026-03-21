@@ -92,10 +92,13 @@ node notion-board-ops.mjs
 
 Core commands:
 
+- `capture --title "..." [--project "..."] [--goal "..."] [--due-date YYYY-MM-DD]`
 - `show --view today|week|month|year|inbox|blocked|needs_scheduling|execution|calendar`
 - `inspect-task --match "..." | --page-id <PAGE_ID>`
 - `add-task --title "..." [--horizon today|this week|this month|this year]`
 - `move-task --match "..." | --page-id <PAGE_ID> [--horizon ...] [--stage ...]`
+- `promote --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year`
+- `defer --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year`
 - `block-task --match "..." | --page-id <PAGE_ID> --reason "..."`
 - `complete-task --match "..." | --page-id <PAGE_ID> [--when YYYY-MM-DD] [--archive false]`
 - `set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO`
@@ -108,6 +111,7 @@ Maintenance commands:
 - `show-completed [--date today|YYYY-MM-DD]`
 - `close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]`
 - `triage-inbox [--date YYYY-MM-DD] [--limit N] [--apply]`
+- `review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]`
 - `reconcile-calendar [--apply-clear-stale]`
 
 ## Completion history

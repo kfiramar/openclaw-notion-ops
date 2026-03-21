@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 
 import {
+  cmdCapture,
   cmdAddTask,
   cmdBlockTask,
   cmdCompleteTask,
+  cmdDefer,
   cmdInspectTask,
   cmdListGoals,
   cmdListProjects,
   cmdMoveTask,
+  cmdPromote,
   cmdSetSchedule,
   cmdShow,
   cmdSync
@@ -15,6 +18,7 @@ import {
 import {
   cmdCloseDay,
   cmdReconcileCalendar,
+  cmdReviewStale,
   cmdShowCompleted,
   cmdTriageInbox
 } from "./src/maintenance.mjs";
@@ -29,6 +33,10 @@ const COMMANDS = {
     help: "show-completed [--date today|YYYY-MM-DD]",
     run: cmdShowCompleted
   },
+  capture: {
+    help: 'capture --title "..." [--project "..."] [--goal "..."] [--due-date YYYY-MM-DD] [--estimated-minutes N]',
+    run: cmdCapture
+  },
   "close-day": {
     help: "close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]",
     run: cmdCloseDay
@@ -41,6 +49,10 @@ const COMMANDS = {
     help: "reconcile-calendar [--apply-clear-stale]",
     run: cmdReconcileCalendar
   },
+  "review-stale": {
+    help: "review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]",
+    run: cmdReviewStale
+  },
   "inspect-task": {
     help: 'inspect-task --match "..." | --page-id <PAGE_ID>',
     run: cmdInspectTask
@@ -52,6 +64,14 @@ const COMMANDS = {
   "move-task": {
     help: 'move-task --match "..." | --page-id <PAGE_ID> [--horizon ...] [--stage ...] [--due-date YYYY-MM-DD]',
     run: cmdMoveTask
+  },
+  promote: {
+    help: 'promote --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year',
+    run: cmdPromote
+  },
+  defer: {
+    help: 'defer --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year [--increment-miss]',
+    run: cmdDefer
   },
   "block-task": {
     help: 'block-task --match "..." | --page-id <PAGE_ID> --reason "..."',

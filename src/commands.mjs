@@ -9,7 +9,12 @@ import {
 } from "./notion.mjs";
 import {
   board,
+  classifyHorizonMove,
+  clearCalendarProperties,
+  defaultStageForTask,
   defaultHorizonForCadence,
+  inferHorizon,
+  inferNeedsCalendar,
   listRows,
   matchTask,
   mirrorRows,
@@ -76,6 +81,105 @@ export function cmdAddTask(args) {
   console.log(JSON.stringify({ ok: true, action: "add-task", page_id: out.id, title }, null, 2));
 }
 
+export function cmdCapture(args) {
+  const b = board();
+  const title = args.title || args._.join(" ");
+  if (!title) throw new Error('usage: capture --title "..." [--project "..."] [--goal "..."]');
+
+  const type = args.type || (args.cadence ? "recurring" : "one_time");
+  const dueDate = isoDate(args["due-date"] || null);
+  const projectIds = resolveRelationArg("projects", args, "project", "project-id");
+  const goalIds = resolveRelationArg("goals", args, "goal", "goal-id");
+  const explicitNeedsCalendar = boolOrNull(args["needs-calendar"]);
+  const draft = {
+    properties: {
+      [TASK_FIELDS.title]: title,
+      [TASK_FIELDS.type]: type,
+      [TASK_FIELDS.priority]: args.priority || "medium",
+      [TASK_FIELDS.estimatedMinutes]:
+        args["estimated-minutes"] === undefined ? null : Number(args["estimated-minutes"]),
+      [TASK_FIELDS.energy]: args.energy || null,
+      [TASK_FIELDS.cadence]: args.cadence || null,
+      [TASK_FIELDS.dueDate]: dueDate ? { start: dueDate, end: null, time_zone: null } : null,
+      [TASK_FIELDS.project]: projectIds,
+      [TASK_FIELDS.goal]: goalIds,
+      [TASK_FIELDS.needsCalendar]: explicitNeedsCalendar,
+      [TASK_FIELDS.scheduledStart]: args.start ? { start: args.start, end: null, time_zone: null } : null,
+      [TASK_FIELDS.scheduledEnd]: args.end ? { start: args.end, end: null, time_zone: null } : null,
+      [TASK_FIELDS.stage]: args.stage || null,
+      [TASK_FIELDS.status]: args.status || null,
+      [TASK_FIELDS.horizon]: args.horizon || null
+    }
+  };
+
+  const inferredHorizon = args.horizon || inferHorizon(draft);
+  const inferredNeedsCalendar = explicitNeedsCalendar ?? inferNeedsCalendar({
+    properties: {
+      ...draft.properties,
+      [TASK_FIELDS.horizon]: inferredHorizon
+    }
+  });
+  const inferredStage =
+    args.stage ||
+    (args.inbox === true
+      ? "inbox"
+      : defaultStageForTask({
+          properties: {
+            ...draft.properties,
+            [TASK_FIELDS.horizon]: inferredHorizon,
+            [TASK_FIELDS.needsCalendar]: inferredNeedsCalendar
+          }
+        }, inferredHorizon));
+  const inferredStatus =
+    args.status ||
+    (inferredStage === "blocked"
+      ? "blocked"
+      : args.start && args.end
+        ? "scheduled"
+        : "todo");
+
+  const payload = {
+    parent: { data_source_id: b.databases.tasks.data_source_id },
+    properties: {
+      [TASK_FIELDS.title]: titleProperty(title),
+      [TASK_FIELDS.stage]: selectProperty(inferredStage),
+      [TASK_FIELDS.status]: selectProperty(inferredStatus),
+      [TASK_FIELDS.horizon]: selectProperty(inferredHorizon),
+      [TASK_FIELDS.type]: selectProperty(type),
+      [TASK_FIELDS.priority]: selectProperty(args.priority || "medium"),
+      [TASK_FIELDS.needsCalendar]: checkboxProperty(inferredNeedsCalendar),
+      [TASK_FIELDS.scheduleType]: selectProperty(args["schedule-type"] || null),
+      [TASK_FIELDS.estimatedMinutes]: numberProperty(args["estimated-minutes"]),
+      [TASK_FIELDS.energy]: selectProperty(args.energy || null),
+      [TASK_FIELDS.cadence]: selectProperty(args.cadence || null),
+      [TASK_FIELDS.dueDate]: dateProperty(dueDate),
+      [TASK_FIELDS.nextDueAt]: dateProperty(isoDate(args["next-due-at"] || null)),
+      [TASK_FIELDS.reviewNotes]: richTextProperty(args.notes || ""),
+      [TASK_FIELDS.project]: relationProperty(projectIds),
+      [TASK_FIELDS.goal]: relationProperty(goalIds),
+      [TASK_FIELDS.scheduledStart]: dateProperty(args.start || null),
+      [TASK_FIELDS.scheduledEnd]: dateProperty(args.end || null)
+    }
+  };
+
+  const out = notionRequest("POST", "/v1/pages", payload, true);
+  kickMirrorSync();
+  console.log(JSON.stringify({
+    ok: true,
+    action: "capture",
+    page_id: out.id,
+    title,
+    inferred: {
+      horizon: inferredHorizon,
+      stage: inferredStage,
+      status: inferredStatus,
+      needs_calendar: inferredNeedsCalendar,
+      project_ids: projectIds,
+      goal_ids: goalIds
+    }
+  }, null, 2));
+}
+
 export function cmdMoveTask(args) {
   const task = matchTask(args);
   updatePageProperties(task.id, {
@@ -104,6 +208,91 @@ export function cmdMoveTask(args) {
       needs_calendar: args["needs-calendar"] ?? null,
       schedule_type: args["schedule-type"] || null
     }
+  }, null, 2));
+}
+
+export function cmdPromote(args) {
+  const task = matchTask(args);
+  const to = args.to || args.horizon;
+  if (!to) throw new Error('usage: promote --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year');
+  const targetStage =
+    args.stage ||
+    defaultStageForTask({
+      ...task,
+      properties: {
+        ...task.properties,
+        [TASK_FIELDS.horizon]: to,
+        [TASK_FIELDS.needsCalendar]:
+          args["needs-calendar"] !== undefined ? boolOrNull(args["needs-calendar"]) : task.properties[TASK_FIELDS.needsCalendar]
+      }
+    }, to);
+  const nextStatus =
+    args.status ||
+    (targetStage === "blocked"
+      ? "blocked"
+      : task.properties[TASK_FIELDS.status] === "scheduled" && targetStage !== "planned"
+        ? "todo"
+        : task.properties[TASK_FIELDS.status] || "todo");
+
+  updatePageProperties(task.id, {
+    [TASK_FIELDS.horizon]: selectProperty(to),
+    [TASK_FIELDS.stage]: selectProperty(targetStage),
+    [TASK_FIELDS.status]: selectProperty(nextStatus),
+    [TASK_FIELDS.needsCalendar]:
+      args["needs-calendar"] !== undefined ? checkboxProperty(boolOrNull(args["needs-calendar"])) : undefined,
+    [TASK_FIELDS.dueDate]: args["due-date"] ? dateProperty(args["due-date"]) : undefined
+  });
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "promote",
+    page_id: task.id,
+    task: task.title,
+    from: task.properties[TASK_FIELDS.horizon] || null,
+    to,
+    direction: classifyHorizonMove(task.properties[TASK_FIELDS.horizon], to),
+    stage: targetStage,
+    status: nextStatus
+  }, null, 2));
+}
+
+export function cmdDefer(args) {
+  const task = matchTask(args);
+  const to = args.to || args.horizon;
+  if (!to) throw new Error('usage: defer --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year');
+  const keepSchedule = args["keep-schedule"] === true;
+  const nextMissCount =
+    args["increment-miss"] === true ? Number(task.properties[TASK_FIELDS.missCount] || 0) + 1 : null;
+  const targetStage =
+    args.stage ||
+    (task.properties[TASK_FIELDS.stage] === "blocked"
+      ? "blocked"
+      : "planned");
+  const nextStatus =
+    args.status ||
+    (targetStage === "blocked" ? "blocked" : "todo");
+
+  updatePageProperties(task.id, {
+    [TASK_FIELDS.horizon]: selectProperty(to),
+    [TASK_FIELDS.stage]: selectProperty(targetStage),
+    [TASK_FIELDS.status]: selectProperty(nextStatus),
+    [TASK_FIELDS.dueDate]: args["due-date"] ? dateProperty(args["due-date"]) : undefined,
+    [TASK_FIELDS.missCount]: nextMissCount === null ? undefined : numberProperty(nextMissCount),
+    ...(keepSchedule ? {} : clearCalendarProperties())
+  });
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "defer",
+    page_id: task.id,
+    task: task.title,
+    from: task.properties[TASK_FIELDS.horizon] || null,
+    to,
+    direction: classifyHorizonMove(task.properties[TASK_FIELDS.horizon], to),
+    stage: targetStage,
+    status: nextStatus,
+    cleared_schedule: !keepSchedule,
+    miss_count: nextMissCount
   }, null, 2));
 }
 

@@ -5,6 +5,7 @@ import {
   carryForwardProperties,
   clearCalendarProperties,
   defaultHorizonForCadence,
+  hasCalendarFields,
   inferHorizon,
   inferNeedsCalendar,
   isDoneTask,
@@ -13,7 +14,7 @@ import {
   summary,
   triageProperties
 } from "./tasks.mjs";
-import { dateProperty, normalizeDateArg, selectProperty } from "./util.mjs";
+import { dateProperty, diffDays, normalizeDateArg, selectProperty } from "./util.mjs";
 
 export function cmdShowCompleted(args) {
   const date = normalizeDateArg(args.date);
@@ -217,5 +218,116 @@ export function cmdReconcileCalendar(args) {
     completed_or_archived_with_event_ref: completedWithEventRef,
     inverted_schedule: invertedSchedule,
     cleared
+  }, null, 2));
+}
+
+export function cmdReviewStale(args) {
+  const date = normalizeDateArg(args.date);
+  const missThreshold = args["miss-threshold"] ? Number(args["miss-threshold"]) : 3;
+  const blockedDays = args["blocked-days"] ? Number(args["blocked-days"]) : 7;
+  const tasks = mirrorRows("tasks").filter((task) => !isDoneTask(task));
+  const validProjectIds = new Set(mirrorRows("projects").map((row) => row.id));
+  const validGoalIds = new Set(mirrorRows("goals").map((row) => row.id));
+
+  const blockedStale = [];
+  const overdue = [];
+  const repeatedMisses = [];
+  const brokenProjectLinks = [];
+  const brokenGoalLinks = [];
+  const calendarGaps = [];
+  const longHorizonUnanchored = [];
+  const invertedSchedule = [];
+
+  for (const task of tasks) {
+    const base = {
+      ...summary(task),
+      last_edited_time: task.last_edited_time || null,
+      miss_count: Number(task.properties[TASK_FIELDS.missCount] || 0),
+      project_ids: task.properties[TASK_FIELDS.project] || [],
+      goal_ids: task.properties[TASK_FIELDS.goal] || []
+    };
+    const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
+    const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
+    const scheduledEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
+    const lastEditedDaysAgo = task.last_edited_time ? diffDays(`${date}T00:00:00Z`, task.last_edited_time) : null;
+    const missingProjectIds = base.project_ids.filter((id) => !validProjectIds.has(id));
+    const missingGoalIds = base.goal_ids.filter((id) => !validGoalIds.has(id));
+
+    if (task.properties[TASK_FIELDS.stage] === "blocked" && lastEditedDaysAgo !== null && lastEditedDaysAgo >= blockedDays) {
+      blockedStale.push({
+        ...base,
+        blocked_days: lastEditedDaysAgo,
+        blocked_by: task.properties[TASK_FIELDS.blockedBy] || "",
+        waiting_on: task.properties[TASK_FIELDS.waitingOn] || ""
+      });
+    }
+
+    if (dueDate && dueDate < date) {
+      overdue.push({
+        ...base,
+        overdue_by_days: diffDays(`${date}T00:00:00Z`, `${dueDate}T00:00:00Z`),
+        due_date: dueDate
+      });
+    }
+
+    if (base.miss_count >= missThreshold) {
+      repeatedMisses.push(base);
+    }
+
+    if (missingProjectIds.length > 0) {
+      brokenProjectLinks.push({
+        ...base,
+        missing_project_ids: missingProjectIds
+      });
+    }
+
+    if (missingGoalIds.length > 0) {
+      brokenGoalLinks.push({
+        ...base,
+        missing_goal_ids: missingGoalIds
+      });
+    }
+
+    if (inferNeedsCalendar(task) && !hasCalendarFields(task)) {
+      calendarGaps.push(base);
+    }
+
+    if (
+      (task.properties[TASK_FIELDS.horizon] === "this month" || task.properties[TASK_FIELDS.horizon] === "this year") &&
+      base.project_ids.length === 0 &&
+      base.goal_ids.length === 0
+    ) {
+      longHorizonUnanchored.push(base);
+    }
+
+    if (scheduledStart && scheduledEnd && Date.parse(scheduledEnd) < Date.parse(scheduledStart)) {
+      invertedSchedule.push(base);
+    }
+  }
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "review-stale",
+    date,
+    miss_threshold: missThreshold,
+    blocked_days: blockedDays,
+    counts: {
+      blocked_stale: blockedStale.length,
+      overdue: overdue.length,
+      repeated_misses: repeatedMisses.length,
+      broken_project_links: brokenProjectLinks.length,
+      broken_goal_links: brokenGoalLinks.length,
+      calendar_gaps: calendarGaps.length,
+      long_horizon_unanchored: longHorizonUnanchored.length,
+      inverted_schedule: invertedSchedule.length
+    },
+    blocked_stale: blockedStale,
+    overdue,
+    repeated_misses: repeatedMisses,
+    broken_project_links: brokenProjectLinks,
+    broken_goal_links: brokenGoalLinks,
+    calendar_gaps: calendarGaps,
+    long_horizon_unanchored: longHorizonUnanchored,
+    inverted_schedule: invertedSchedule
   }, null, 2));
 }

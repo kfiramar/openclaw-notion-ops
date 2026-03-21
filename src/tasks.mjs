@@ -15,6 +15,13 @@ import {
   selectProperty
 } from "./util.mjs";
 
+const HORIZON_ORDER = {
+  today: 0,
+  "this week": 1,
+  "this month": 2,
+  "this year": 3
+};
+
 export function board() {
   return loadJson(BOARD_PATH);
 }
@@ -145,6 +152,32 @@ export function inferNeedsCalendar(task) {
   const estimated = task.properties[TASK_FIELDS.estimatedMinutes];
   const priority = task.properties[TASK_FIELDS.priority];
   return Number(estimated || 0) >= 45 || priority === "high" || priority === "critical";
+}
+
+export function defaultStageForTask(task, horizon = null) {
+  if (task.properties[TASK_FIELDS.stage] === "blocked" || task.properties[TASK_FIELDS.status] === "blocked") {
+    return "blocked";
+  }
+  const targetHorizon = horizon || task.properties[TASK_FIELDS.horizon];
+  const hasSchedule =
+    Boolean(dateStart(task.properties[TASK_FIELDS.scheduledStart])) ||
+    Boolean(dateStart(task.properties[TASK_FIELDS.scheduledEnd]));
+  if (inferNeedsCalendar(task) && !hasSchedule) return "planned";
+  if (targetHorizon === "today" || targetHorizon === "this week") return "active";
+  return "planned";
+}
+
+export function horizonRank(value) {
+  return Object.prototype.hasOwnProperty.call(HORIZON_ORDER, value) ? HORIZON_ORDER[value] : null;
+}
+
+export function classifyHorizonMove(fromValue, toValue) {
+  const from = horizonRank(fromValue);
+  const to = horizonRank(toValue);
+  if (from === null || to === null) return "unknown";
+  if (to < from) return "promote";
+  if (to > from) return "defer";
+  return "same";
 }
 
 export function listRows(kind, fields) {
