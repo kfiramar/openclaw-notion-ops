@@ -1,0 +1,5 @@
+node_modules/
+history/completions/*.jsonl
+board.json
+.env
+.DS_Store

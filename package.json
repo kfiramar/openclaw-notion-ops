@@ -1,0 +1,16 @@
+{
+  "name": "openclaw-notion-ops",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generic Notion board operations wrapper for OpenClaw-style personal systems",
+  "bin": {
+    "notion-board-ops": "./notion-board-ops.mjs"
+  },
+  "scripts": {
+    "help": "node ./notion-board-ops.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

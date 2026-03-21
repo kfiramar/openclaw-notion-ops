@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "owner_agent": "Lifestyle",
+  "databases": {
+    "tasks": {
+      "title": "Lifestyle Tasks",
+      "database_id": "YOUR_TASK_DATABASE_ID",
+      "data_source_id": "YOUR_TASK_DATA_SOURCE_ID",
+      "mirror_file": "/data/.openclaw/notion-mirror/current/data-sources/your-tasks.json"
+    },
+    "projects": {
+      "title": "Lifestyle Projects",
+      "database_id": "YOUR_PROJECT_DATABASE_ID",
+      "data_source_id": "YOUR_PROJECT_DATA_SOURCE_ID",
+      "mirror_file": "/data/.openclaw/notion-mirror/current/data-sources/your-projects.json"
+    },
+    "goals": {
+      "title": "Lifestyle Goals",
+      "database_id": "YOUR_GOAL_DATABASE_ID",
+      "data_source_id": "YOUR_GOAL_DATA_SOURCE_ID",
+      "mirror_file": "/data/.openclaw/notion-mirror/current/data-sources/your-goals.json"
+    }
+  }
+}
