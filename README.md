@@ -4,6 +4,12 @@ Generic local CLI for operating a Notion-backed task board from a mirror-first w
 
 This repo was extracted from a working OpenClaw Lifestyle board wrapper and generalized so it can be reused without carrying personal IDs, URLs, or machine-specific paths.
 
+For your current machine, the intended model is:
+
+- edit and version code here
+- sync the generated live wrapper into the OpenClaw workspace
+- do not hand-edit the deployed copy unless you intend to port that change back
+
 ## What it does
 
 - reads tasks, projects, and goals from a local Notion mirror
@@ -44,6 +50,38 @@ export NOTION_MIRROR_ROOT="/data/.openclaw/notion-mirror"
 export NOTION_MIRROR_SYNC="/data/.openclaw/skills/notion-local-mirror/scripts/notion-sync.mjs"
 export BOARD_PATH="/abs/path/to/board.json"
 export HISTORY_ROOT="/abs/path/to/history"
+```
+
+## Keeping OpenClaw In Sync
+
+Use the repo as the source of truth, then regenerate the live wrapper:
+
+```bash
+npm run sync:openclaw
+```
+
+Check whether the live workspace has drifted:
+
+```bash
+npm run check:openclaw
+```
+
+See the raw differences:
+
+```bash
+npm run diff:openclaw
+```
+
+By default the sync target is:
+
+```text
+/docker/openclaw-pma3/data/.openclaw/workspace-personal
+```
+
+You can override it:
+
+```bash
+OPENCLAW_WORKSPACE=/some/other/workspace npm run sync:openclaw
 ```
 
 ## Commands

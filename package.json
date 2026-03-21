@@ -8,7 +8,10 @@
     "notion-board-ops": "./notion-board-ops.mjs"
   },
   "scripts": {
-    "help": "node ./notion-board-ops.mjs"
+    "help": "node ./notion-board-ops.mjs",
+    "sync:openclaw": "node ./scripts/sync-to-openclaw.mjs",
+    "check:openclaw": "node ./scripts/sync-to-openclaw.mjs --check",
+    "diff:openclaw": "bash ./scripts/diff-live.sh"
   },
   "engines": {
     "node": ">=18"
