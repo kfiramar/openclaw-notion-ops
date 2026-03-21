@@ -93,6 +93,8 @@ node notion-board-ops.mjs
 Core commands:
 
 - `capture --title "..." [--project "..."] [--goal "..."] [--due-date YYYY-MM-DD]`
+- `plan-day [--date today|YYYY-MM-DD] [--limit N] [--start-hour H] [--end-hour H]`
+- `plan-week [--date today|YYYY-MM-DD] [--promote-limit N] [--capacity-minutes N]`
 - `show --view today|week|month|year|inbox|blocked|needs_scheduling|execution|calendar`
 - `inspect-task --match "..." | --page-id <PAGE_ID>`
 - `add-task --title "..." [--horizon today|this week|this month|this year]`
@@ -104,6 +106,8 @@ Core commands:
 - `set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO`
 - `list-projects`
 - `list-goals`
+- `project-review [--match "..."] | [--page-id <PAGE_ID>]`
+- `goal-review [--match "..."] | [--page-id <PAGE_ID>]`
 - `sync`
 
 Maintenance commands:

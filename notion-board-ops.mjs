@@ -17,6 +17,10 @@ import {
 } from "./src/commands.mjs";
 import {
   cmdCloseDay,
+  cmdGoalReview,
+  cmdPlanDay,
+  cmdPlanWeek,
+  cmdProjectReview,
   cmdReconcileCalendar,
   cmdReviewStale,
   cmdShowCompleted,
@@ -37,6 +41,14 @@ const COMMANDS = {
     help: 'capture --title "..." [--project "..."] [--goal "..."] [--due-date YYYY-MM-DD] [--estimated-minutes N]',
     run: cmdCapture
   },
+  "plan-day": {
+    help: "plan-day [--date today|YYYY-MM-DD] [--limit N] [--start-hour H] [--end-hour H]",
+    run: cmdPlanDay
+  },
+  "plan-week": {
+    help: "plan-week [--date today|YYYY-MM-DD] [--promote-limit N] [--capacity-minutes N]",
+    run: cmdPlanWeek
+  },
   "close-day": {
     help: "close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]",
     run: cmdCloseDay
@@ -52,6 +64,14 @@ const COMMANDS = {
   "review-stale": {
     help: "review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]",
     run: cmdReviewStale
+  },
+  "project-review": {
+    help: 'project-review [--match "..."] | [--page-id <PAGE_ID>]',
+    run: cmdProjectReview
+  },
+  "goal-review": {
+    help: 'goal-review [--match "..."] | [--page-id <PAGE_ID>]',
+    run: cmdGoalReview
   },
   "inspect-task": {
     help: 'inspect-task --match "..." | --page-id <PAGE_ID>',

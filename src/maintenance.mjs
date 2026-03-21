@@ -8,13 +8,120 @@ import {
   hasCalendarFields,
   inferHorizon,
   inferNeedsCalendar,
+  isActiveTask,
   isDoneTask,
   mirrorRows,
   plusCadence,
+  selectRow,
+  priorityWeight,
   summary,
   triageProperties
 } from "./tasks.mjs";
 import { dateProperty, diffDays, normalizeDateArg, selectProperty } from "./util.mjs";
+
+function scoreTaskForPlan(task, date) {
+  const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
+  const horizon = task.properties[TASK_FIELDS.horizon];
+  const stage = task.properties[TASK_FIELDS.stage];
+  let score = priorityWeight(task.properties[TASK_FIELDS.priority]) * 100;
+
+  if (horizon === "today") score += 200;
+  else if (horizon === "this week") score += 120;
+  else if (horizon === "this month") score += 40;
+
+  if (stage === "active") score += 35;
+  if (stage === "planned") score += 15;
+
+  if (dueDate) {
+    if (dueDate <= date) score += 80;
+    else {
+      const days = diffDays(`${dueDate}T00:00:00Z`, `${date}T00:00:00Z`);
+      if (days !== null) score += Math.max(0, 25 - Math.min(days, 25));
+    }
+  }
+
+  if (inferNeedsCalendar(task)) score += 10;
+  if (task.properties[TASK_FIELDS.type] === "goal_generated") score += 8;
+  if (task.properties[TASK_FIELDS.project]?.length) score += 4;
+  if (task.properties[TASK_FIELDS.goal]?.length) score += 4;
+
+  return score;
+}
+
+function comparePlannedTasks(a, b, date) {
+  const scoreDiff = scoreTaskForPlan(b, date) - scoreTaskForPlan(a, date);
+  if (scoreDiff !== 0) return scoreDiff;
+
+  const aDue = dateStart(a.properties[TASK_FIELDS.dueDate]) || "9999-12-31";
+  const bDue = dateStart(b.properties[TASK_FIELDS.dueDate]) || "9999-12-31";
+  if (aDue !== bDue) return aDue.localeCompare(bDue);
+
+  return (a.title || "").localeCompare(b.title || "");
+}
+
+function taskMinutes(task) {
+  return Number(task.properties[TASK_FIELDS.estimatedMinutes] || 0);
+}
+
+function plannedBlock(baseDate, startMinutes, durationMinutes, task) {
+  const hour = String(Math.floor(startMinutes / 60)).padStart(2, "0");
+  const minute = String(startMinutes % 60).padStart(2, "0");
+  const endTotal = startMinutes + durationMinutes;
+  const endHour = String(Math.floor(endTotal / 60)).padStart(2, "0");
+  const endMinute = String(endTotal % 60).padStart(2, "0");
+
+  return {
+    page_id: task.id,
+    title: task.title,
+    suggested_start: `${baseDate}T${hour}:${minute}:00`,
+    suggested_end: `${baseDate}T${endHour}:${endMinute}:00`,
+    estimated_minutes: durationMinutes
+  };
+}
+
+function buildDayScheduleSuggestions(tasks, date, startHour = 9, endHour = 18) {
+  const results = [];
+  let cursor = startHour * 60;
+  const limit = endHour * 60;
+
+  for (const task of tasks) {
+    const minutes = Math.max(15, taskMinutes(task) || 30);
+    if (cursor + minutes > limit) break;
+    results.push(plannedBlock(date, cursor, minutes, task));
+    cursor += minutes + 15;
+  }
+
+  return results;
+}
+
+function taskReviewShape(task) {
+  return {
+    ...summary(task),
+    priority: task.properties[TASK_FIELDS.priority] || null,
+    estimated_minutes: taskMinutes(task),
+    project_ids: task.properties[TASK_FIELDS.project] || [],
+    goal_ids: task.properties[TASK_FIELDS.goal] || []
+  };
+}
+
+function countBy(items, keyFn) {
+  const counts = {};
+  for (const item of items) {
+    const key = keyFn(item);
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
+}
+
+function resolveRows(rows, args, label) {
+  if (args["page-id"]) {
+    const row = rows.find((item) => item.id === args["page-id"]);
+    if (!row) throw new Error(`no ${label} matched page id ${args["page-id"]}`);
+    return [row];
+  }
+  if (args.match) return [selectRow(rows, args.match, label)];
+  return rows;
+}
 
 export function cmdShowCompleted(args) {
   const date = normalizeDateArg(args.date);
@@ -329,5 +436,201 @@ export function cmdReviewStale(args) {
     calendar_gaps: calendarGaps,
     long_horizon_unanchored: longHorizonUnanchored,
     inverted_schedule: invertedSchedule
+  }, null, 2));
+}
+
+export function cmdPlanDay(args) {
+  const date = normalizeDateArg(args.date);
+  const limit = args.limit ? Number(args.limit) : 3;
+  const startHour = args["start-hour"] ? Number(args["start-hour"]) : 9;
+  const endHour = args["end-hour"] ? Number(args["end-hour"]) : 18;
+  const tasks = mirrorRows("tasks").filter((task) => isActiveTask(task) && task.properties[TASK_FIELDS.stage] !== "blocked");
+
+  const today = tasks.filter((task) => task.properties[TASK_FIELDS.horizon] === "today");
+  const urgentWeek = tasks.filter((task) => {
+    if (task.properties[TASK_FIELDS.horizon] !== "this week") return false;
+    const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
+    if (!dueDate) return false;
+    return dueDate <= date || diffDays(`${dueDate}T00:00:00Z`, `${date}T00:00:00Z`) <= 3;
+  });
+
+  const candidateMap = new Map();
+  for (const task of [...today, ...urgentWeek]) {
+    candidateMap.set(task.id, task);
+  }
+  const candidates = [...candidateMap.values()].sort((a, b) => comparePlannedTasks(a, b, date));
+
+  const alreadyScheduled = candidates.filter((task) => hasCalendarFields(task));
+  const priorities = candidates.slice(0, limit);
+  const unscheduledPriorityTasks = priorities.filter((task) => !hasCalendarFields(task));
+  const scheduleSuggestions = buildDayScheduleSuggestions(
+    unscheduledPriorityTasks.filter((task) => inferNeedsCalendar(task)),
+    date,
+    startHour,
+    endHour
+  );
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "plan-day",
+    date,
+    limit,
+    counts: {
+      today: today.length,
+      urgent_week: urgentWeek.length,
+      candidate_pool: candidates.length,
+      priorities: priorities.length,
+      already_scheduled: alreadyScheduled.length,
+      schedule_suggestions: scheduleSuggestions.length
+    },
+    priorities: priorities.map(taskReviewShape),
+    already_scheduled: alreadyScheduled.map(taskReviewShape),
+    schedule_suggestions: scheduleSuggestions,
+    notes: [
+      "priorities prefer today items, urgent weekly work, and higher-priority tasks",
+      "schedule suggestions are heuristic blocks only and do not inspect Google Calendar availability"
+    ]
+  }, null, 2));
+}
+
+export function cmdPlanWeek(args) {
+  const date = normalizeDateArg(args.date);
+  const promoteLimit = args["promote-limit"] ? Number(args["promote-limit"]) : 3;
+  const capacityMinutes = args["capacity-minutes"] ? Number(args["capacity-minutes"]) : 600;
+  const tasks = mirrorRows("tasks").filter((task) => isActiveTask(task) && task.properties[TASK_FIELDS.stage] !== "blocked");
+
+  const weekTasks = tasks
+    .filter((task) => task.properties[TASK_FIELDS.horizon] === "this week" || task.properties[TASK_FIELDS.horizon] === "today")
+    .sort((a, b) => comparePlannedTasks(a, b, date));
+
+  const promotable = tasks
+    .filter((task) => {
+      const horizon = task.properties[TASK_FIELDS.horizon];
+      return horizon === "this month" || horizon === "this year";
+    })
+    .sort((a, b) => comparePlannedTasks(a, b, date))
+    .slice(0, promoteLimit);
+
+  const scheduledMinutes = weekTasks
+    .filter((task) => hasCalendarFields(task))
+    .reduce((sum, task) => sum + taskMinutes(task), 0);
+  const unscheduledMinutes = weekTasks
+    .filter((task) => !hasCalendarFields(task))
+    .reduce((sum, task) => sum + taskMinutes(task), 0);
+  const totalMinutes = scheduledMinutes + unscheduledMinutes;
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "plan-week",
+    date,
+    capacity_minutes: capacityMinutes,
+    totals: {
+      week_tasks: weekTasks.length,
+      scheduled_minutes: scheduledMinutes,
+      unscheduled_minutes: unscheduledMinutes,
+      total_minutes: totalMinutes,
+      overload_minutes: Math.max(0, totalMinutes - capacityMinutes)
+    },
+    focus: weekTasks.slice(0, 5).map(taskReviewShape),
+    promotable: promotable.map((task) => ({
+      ...taskReviewShape(task),
+      reason:
+        task.properties[TASK_FIELDS.horizon] === "this month"
+          ? "monthly task with near-term value"
+          : "yearly task that should be concretized this week"
+    })),
+    notes: [
+      "promotable is a shortlist from this month and this year ordered by urgency and priority",
+      "capacity is heuristic and should be tuned for your real weekly bandwidth"
+    ]
+  }, null, 2));
+}
+
+export function cmdProjectReview(args) {
+  const projects = mirrorRows("projects");
+  const tasks = mirrorRows("tasks").filter((task) => isActiveTask(task));
+  const selectedProjects = resolveRows(projects, args, "project");
+
+  const reviews = selectedProjects.map((project) => {
+    const linkedTasks = tasks.filter((task) => (task.properties[TASK_FIELDS.project] || []).includes(project.id));
+    const nextActions = linkedTasks.sort((a, b) => comparePlannedTasks(a, b, normalizeDateArg(args.date))).slice(0, 3);
+    return {
+      id: project.id,
+      title: project.title,
+      status: project.properties.Status || null,
+      priority: project.properties.Priority || null,
+      area: project.properties.Area || null,
+      target_date: dateStart(project.properties["Target Date"]),
+      goal_ids: project.properties.Goal || [],
+      task_counts: {
+        total: linkedTasks.length,
+        by_horizon: countBy(linkedTasks, (task) => task.properties[TASK_FIELDS.horizon] || "none"),
+        by_stage: countBy(linkedTasks, (task) => task.properties[TASK_FIELDS.stage] || "none")
+      },
+      next_actions: nextActions.map(taskReviewShape),
+      health:
+        linkedTasks.length === 0
+          ? "no-linked-tasks"
+          : linkedTasks.some((task) => task.properties[TASK_FIELDS.horizon] === "today" || task.properties[TASK_FIELDS.horizon] === "this week")
+            ? "active"
+            : "needs-near-term-task",
+      summary: project.properties["Success Metric"] || ""
+    };
+  });
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "project-review",
+    count: reviews.length,
+    reviews
+  }, null, 2));
+}
+
+export function cmdGoalReview(args) {
+  const goals = mirrorRows("goals");
+  const projects = mirrorRows("projects");
+  const tasks = mirrorRows("tasks").filter((task) => isActiveTask(task));
+  const selectedGoals = resolveRows(goals, args, "goal");
+
+  const reviews = selectedGoals.map((goal) => {
+    const linkedProjects = projects.filter((project) => (project.properties.Goal || []).includes(goal.id));
+    const linkedTasks = tasks.filter((task) => (task.properties[TASK_FIELDS.goal] || []).includes(goal.id));
+    const nextActions = linkedTasks.sort((a, b) => comparePlannedTasks(a, b, normalizeDateArg(args.date))).slice(0, 4);
+    return {
+      id: goal.id,
+      title: goal.title,
+      status: goal.properties.Status || null,
+      health: goal.properties.Health || null,
+      horizon: goal.properties.Horizon || null,
+      target_date: dateStart(goal.properties["Target Date"]),
+      project_count: linkedProjects.length,
+      projects: linkedProjects.map((project) => ({
+        id: project.id,
+        title: project.title,
+        status: project.properties.Status || null,
+        priority: project.properties.Priority || null
+      })),
+      task_counts: {
+        total: linkedTasks.length,
+        by_horizon: countBy(linkedTasks, (task) => task.properties[TASK_FIELDS.horizon] || "none"),
+        by_stage: countBy(linkedTasks, (task) => task.properties[TASK_FIELDS.stage] || "none")
+      },
+      next_actions: nextActions.map(taskReviewShape),
+      planning_notes: goal.properties["Planning Notes"] || "",
+      success_metric: goal.properties["Success Metric"] || "",
+      attention:
+        goal.properties.Health === "at_risk"
+          ? "needs-attention"
+          : nextActions.length === 0
+            ? "needs-derived-work"
+            : "tracking"
+    };
+  });
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "goal-review",
+    count: reviews.length,
+    reviews
   }, null, 2));
 }

@@ -154,6 +154,18 @@ export function inferNeedsCalendar(task) {
   return Number(estimated || 0) >= 45 || priority === "high" || priority === "critical";
 }
 
+export function priorityWeight(value) {
+  if (value === "critical") return 4;
+  if (value === "high") return 3;
+  if (value === "medium") return 2;
+  if (value === "low") return 1;
+  return 0;
+}
+
+export function isActiveTask(task) {
+  return !isDoneTask(task);
+}
+
 export function defaultStageForTask(task, horizon = null) {
   if (task.properties[TASK_FIELDS.stage] === "blocked" || task.properties[TASK_FIELDS.status] === "blocked") {
     return "blocked";
