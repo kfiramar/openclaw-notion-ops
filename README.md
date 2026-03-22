@@ -133,6 +133,8 @@ Core commands:
 - `plan-week [--date today|YYYY-MM-DD] [--promote-limit N] [--capacity-minutes N]`
 - `show --view today|week|month|year|inbox|blocked|needs_scheduling|execution|calendar`
 - `inspect-task --match "..." | --page-id <PAGE_ID>`
+- `find-task --page-id <PAGE_ID> | --title-exact "..." | --match "..." [--first|--latest]`
+- `search-tasks --page-id <PAGE_ID> | --title-exact "..." | --match "..." [--first|--latest]`
 - `add-task --title "..." [--horizon today|this week|this month|this year]`
 - `move-task --match "..." | --page-id <PAGE_ID> [--horizon ...] [--stage ...]`
 - `promote --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year`
