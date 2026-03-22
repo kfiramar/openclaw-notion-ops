@@ -65,6 +65,7 @@ function translateContainerPathToHost(filePath) {
 
 export function liveConfigText() {
   return `export const CONTAINER = ${JSON.stringify(container)};
+export const PRIMARY_CALENDAR_ID = ${JSON.stringify(process.env.PRIMARY_CALENDAR_ID || "suukpehoy@gmail.com")};
 export const NOTION_API = ${JSON.stringify(notionApiPath)};
 export const MIRROR_ROOT = ${JSON.stringify(mirrorRoot)};
 export const MIRROR_SYNC = ${JSON.stringify(mirrorSyncPath)};
@@ -74,6 +75,9 @@ export const OPENCLAW_CONTAINER_ROOT = ${JSON.stringify(openclawContainerRoot)};
 export const BOARD_PATH = ${JSON.stringify(targetBoardInContainer)};
 export const HISTORY_ROOT = ${JSON.stringify(targetHistoryInContainer)};
 export const COMPLETIONS_ROOT = \`\${HISTORY_ROOT}/completions\`;
+export const DISABLE_BACKGROUND_SYNC = /^(1|true|yes)$/i.test(
+  String(process.env.NOTION_OPS_DISABLE_BACKGROUND_SYNC || "")
+);
 
 export const TASK_FIELDS = {
   title: "Task Name",
@@ -81,12 +85,18 @@ export const TASK_FIELDS = {
   status: "Status",
   horizon: "Horizon",
   type: "Type",
+  repeatMode: "Repeat Mode",
   priority: "Priority",
   needsCalendar: "Needs Calendar",
+  schedulingMode: "Scheduling Mode",
   scheduleType: "Schedule Type",
   estimatedMinutes: "Estimated Minutes",
   energy: "Energy",
   cadence: "Cadence",
+  repeatWindow: "Repeat Window",
+  repeatTargetCount: "Repeat Target Count",
+  repeatProgress: "Repeat Progress",
+  repeatDays: "Repeat Days",
   dueDate: "Due Date",
   nextDueAt: "Next Due At",
   reviewNotes: "Review Notes",
@@ -140,10 +150,25 @@ export const TASK_VIEW_SPECS = {
       row.properties[TASK_FIELDS.stage] === "blocked" &&
       row.properties[TASK_FIELDS.status] !== "done"
   },
+  overdue: {
+    aliases: ["overdue"],
+    filter: (row) => {
+      const dueDate = row.properties[TASK_FIELDS.dueDate]?.start || row.properties[TASK_FIELDS.dueDate];
+      return (
+        Boolean(dueDate) &&
+        dueDate < new Date().toISOString().slice(0, 10) &&
+        row.properties[TASK_FIELDS.status] !== "done" &&
+        row.properties[TASK_FIELDS.stage] !== "archived"
+      );
+    }
+  },
   needs_scheduling: {
     aliases: ["needs_scheduling"],
     filter: (row) =>
       row.properties[TASK_FIELDS.needsCalendar] === true &&
+      !row.properties[TASK_FIELDS.calendarEventId] &&
+      !row.properties[TASK_FIELDS.scheduledStart]?.start &&
+      !row.properties[TASK_FIELDS.scheduledEnd]?.start &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
   },

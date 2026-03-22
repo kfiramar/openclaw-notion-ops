@@ -3,10 +3,14 @@
 import {
   cmdCapture,
   cmdAddTask,
+  cmdDeleteTask,
+  cmdArchiveTask,
   cmdBlockTask,
   cmdCompleteTask,
   cmdDefer,
+  cmdFindTask,
   cmdInspectTask,
+  cmdLinkSchedule,
   cmdListGoals,
   cmdListProjects,
   cmdMoveTask,
@@ -15,7 +19,11 @@ import {
   cmdRescheduleTask,
   cmdSetSchedule,
   cmdShow,
-  cmdSync
+  cmdSearchTasks,
+  cmdSync,
+  cmdUnlinkSchedule,
+  cmdVerifyTask,
+  cmdVerifySchedule
 } from "./src/commands.mjs";
 import {
   cmdCloseDay,
@@ -35,7 +43,7 @@ import { parseArgs } from "./src/util.mjs";
 
 const COMMANDS = {
   show: {
-    help: "show --view today|week|month|year|inbox|blocked|needs_scheduling|execution|calendar",
+    help: "show --view today|week|month|year|inbox|blocked|overdue|needs_scheduling|execution|calendar",
     run: cmdShow
   },
   "show-completed": {
@@ -55,31 +63,31 @@ const COMMANDS = {
     run: cmdPlanWeek
   },
   "close-day": {
-    help: "close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]",
+    help: "close-day [--page-id <PAGE_ID>] [--date YYYY-MM-DD] [--carry-to this week|this month|this year]",
     run: cmdCloseDay
   },
   "refresh-manual-repeat": {
-    help: "refresh-manual-repeat [--date today|YYYY-MM-DD] [--apply]",
+    help: "refresh-manual-repeat [--page-id <PAGE_ID>] [--date today|YYYY-MM-DD] [--apply]",
     run: cmdRefreshManualRepeat
   },
   "triage-inbox": {
-    help: "triage-inbox [--date YYYY-MM-DD] [--limit N] [--apply]",
+    help: "triage-inbox [--page-id <PAGE_ID>] [--date YYYY-MM-DD] [--limit N] [--apply]",
     run: cmdTriageInbox
   },
   "reconcile-calendar": {
-    help: "reconcile-calendar [--apply-clear-stale] [--apply-link-matches]",
+    help: "reconcile-calendar [--page-id <PAGE_ID>] [--apply-clear-stale] [--apply-link-matches]",
     run: cmdReconcileCalendar
   },
   "schedule-sweep": {
-    help: "schedule-sweep [--date today|YYYY-MM-DD] [--days N] [--limit N] [--max-daily-minutes N] [--apply]",
+    help: "schedule-sweep [--page-id <PAGE_ID>] [--date today|YYYY-MM-DD] [--days N] [--limit N] [--max-daily-minutes N] [--apply] [--apply-hard-time]",
     run: cmdScheduleSweep
   },
   "scheduling-decisions": {
-    help: "scheduling-decisions [--date today|tomorrow|YYYY-MM-DD] [--days N] [--limit N]",
+    help: "scheduling-decisions [--page-id <PAGE_ID>] [--date today|tomorrow|YYYY-MM-DD] [--days N] [--limit N]",
     run: cmdSchedulingDecisions
   },
   "review-stale": {
-    help: "review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]",
+    help: "review-stale [--page-id <PAGE_ID>] [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]",
     run: cmdReviewStale
   },
   "project-review": {
@@ -93,6 +101,14 @@ const COMMANDS = {
   "inspect-task": {
     help: 'inspect-task --match "..." | --page-id <PAGE_ID>',
     run: cmdInspectTask
+  },
+  "find-task": {
+    help: 'find-task --page-id <PAGE_ID> | --title-exact "..." | --match "..." [--first|--latest] [--include-archived]',
+    run: cmdFindTask
+  },
+  "search-tasks": {
+    help: 'search-tasks --page-id <PAGE_ID> | --title-exact "..." | --match "..." [--first|--latest] [--include-archived]',
+    run: cmdSearchTasks
   },
   "add-task": {
     help: 'add-task --title "..." [--horizon today|this week|this month|this year] [--project "..."] [--project-id <ID>] [--goal "..."] [--goal-id <ID>] [--cadence daily|weekly|monthly] [--repeat-mode none|cadence|manual_repeat|goal_derived] [--repeat-window week|month|year] [--repeat-target-count N] [--repeat-days "Sunday,Monday,..."] [--needs-calendar true|false] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
@@ -118,12 +134,36 @@ const COMMANDS = {
     help: 'complete-task --match "..." | --page-id <PAGE_ID> [--when YYYY-MM-DD] [--archive false]',
     run: cmdCompleteTask
   },
+  "archive-task": {
+    help: 'archive-task --match "..." | --page-id <PAGE_ID> [--all-matches]',
+    run: cmdArchiveTask
+  },
+  "delete-task": {
+    help: 'delete-task --match "..." | --page-id <PAGE_ID> [--all-matches] [--allow-recurring]',
+    run: cmdDeleteTask
+  },
   "set-schedule": {
     help: 'set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
     run: cmdSetSchedule
   },
+  "link-schedule": {
+    help: 'link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
+    run: cmdLinkSchedule
+  },
+  "unlink-schedule": {
+    help: 'unlink-schedule --match "..." | --page-id <PAGE_ID>',
+    run: cmdUnlinkSchedule
+  },
+  "verify-schedule": {
+    help: 'verify-schedule --match "..." | --page-id <PAGE_ID>',
+    run: cmdVerifySchedule
+  },
+  "verify-task": {
+    help: 'verify-task --match "..." | --page-id <PAGE_ID> [--archived true|false] [--scheduled true|false] [--linked true|false] [--stage ...] [--status ...] [--horizon ...] [--schedule-state ...] [--schedule-synced true|false] [--calendar-event-status ...] [--prior-event-id <EVENT_ID>]',
+    run: cmdVerifyTask
+  },
   "remove-schedule": {
-    help: 'remove-schedule --match "..." | --page-id <PAGE_ID> [--status todo] [--stage planned|active|blocked|inbox]',
+    help: 'remove-schedule --match "..." | --page-id <PAGE_ID> [--all-matches] [--status todo] [--stage planned|active|blocked|inbox]',
     run: cmdRemoveSchedule
   },
   "reschedule-task": {

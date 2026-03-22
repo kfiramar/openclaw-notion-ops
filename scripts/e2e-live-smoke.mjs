@@ -2,12 +2,13 @@
 
 import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+
+process.env.NOTION_OPS_DISABLE_BACKGROUND_SYNC =
+  process.env.NOTION_OPS_DISABLE_BACKGROUND_SYNC || "1";
 
 const WORKSPACE_ROOT =
   process.env.OPENCLAW_WORKSPACE || "/docker/openclaw-pma3/data/.openclaw/workspace-personal";
 const WRAPPER_PATH = path.join(WORKSPACE_ROOT, "lifestyle-ops.mjs");
-const LIB_ROOT = path.join(WORKSPACE_ROOT, "lifestyle-ops-lib");
 const CONTAINER = process.env.OPENCLAW_CONTAINER || "openclaw-pma3-openclaw-1";
 const CALENDAR_ID = process.env.PRIMARY_CALENDAR_ID || "suukpehoy@gmail.com";
 const BASE_DATE = process.env.E2E_BASE_DATE || "2026-03-22";
@@ -21,13 +22,13 @@ const createdTaskIds = [];
 const createdEventIds = new Set();
 const results = [];
 
-const { archivePage } = await import(pathToFileURL(path.join(LIB_ROOT, "notion.mjs")).href);
-
-function shellJson(command, args) {
+function shellJson(command, args, { timeoutMs = 120000 } = {}) {
   try {
     const stdout = execFileSync(command, args, {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      killSignal: "SIGKILL"
     });
     return JSON.parse(stdout);
   } catch (error) {
@@ -38,12 +39,12 @@ function shellJson(command, args) {
   }
 }
 
-function runWrapper(args) {
-  return shellJson("node", [WRAPPER_PATH, ...args]);
+function runWrapper(args, options = {}) {
+  return shellJson("node", [WRAPPER_PATH, ...args], options);
 }
 
-function runGog(args) {
-  return shellJson("docker", ["exec", CONTAINER, "gog", ...args]);
+function runGog(args, options = {}) {
+  return shellJson("docker", ["exec", CONTAINER, "gog", ...args], options);
 }
 
 function unwrapEvent(payload) {
@@ -116,31 +117,36 @@ function recordTask(pageId) {
 }
 
 async function step(name, fn) {
+  console.error(`[e2e-live-smoke] start ${name}`);
   try {
     const detail = await fn();
     results.push({ name, ok: true, detail });
+    console.error(`[e2e-live-smoke] ok ${name}`);
   } catch (error) {
     results.push({
       name,
       ok: false,
       error: error.message
     });
+    console.error(`[e2e-live-smoke] fail ${name}: ${error.message}`);
   }
 }
 
 async function cleanup() {
+  const startedAt = Date.now();
   for (const pageId of createdTaskIds) {
+    if (Date.now() - startedAt > 120000) {
+      console.error("[e2e-live-smoke] cleanup deadline reached; stopping task cleanup");
+      break;
+    }
     try {
-      const task = inspectTask(pageId);
-      const eventId = task.properties?.["Calendar Event ID"] || "";
-      if (eventId || task.properties?.["Scheduled Start"] || task.properties?.["Scheduled End"]) {
-        try {
-          runWrapper(["remove-schedule", "--page-id", pageId]);
-        } catch {
-          // Best-effort cleanup only.
-        }
+      console.error(`[e2e-live-smoke] cleanup task ${pageId}`);
+      try {
+        runWrapper(["remove-schedule", "--page-id", pageId], { timeoutMs: 15000 });
+      } catch {
+        // Best-effort cleanup only.
       }
-      await archivePage(pageId);
+      runWrapper(["archive-task", "--page-id", pageId], { timeoutMs: 15000 });
     } catch {
       // Best-effort cleanup only.
     }
@@ -184,6 +190,77 @@ await step("sync-and-read-views", async () => {
     goal_count: goals.count,
     today_count: views[0].count,
     week_focus: weekPlan.focus?.length || 0
+  };
+});
+
+await step("find-search-deterministic-lookup", async () => {
+  const uniqueTitle = title("Immediate Exact Lookup");
+  const uniqueAdd = runWrapper([
+    "add-task",
+    "--title",
+    uniqueTitle,
+    "--date",
+    BASE_DATE,
+    "--horizon",
+    "today"
+  ]);
+  const uniquePageId = recordTask(uniqueAdd.page_id);
+
+  const exact = runWrapper(["find-task", "--title-exact", uniqueTitle]);
+  assert(exact.count === 1, "find-task exact lookup did not return exactly one row");
+  assert(exact.row.page_id === uniquePageId, "find-task exact lookup missed the newly created task");
+
+  const duplicateTitle = title("Deterministic Duplicate");
+  const firstAdd = runWrapper([
+    "add-task",
+    "--title",
+    duplicateTitle,
+    "--date",
+    BASE_DATE,
+    "--horizon",
+    "today"
+  ]);
+  const firstPageId = recordTask(firstAdd.page_id);
+
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+
+  const latestAdd = runWrapper([
+    "add-task",
+    "--title",
+    duplicateTitle,
+    "--date",
+    BASE_DATE,
+    "--horizon",
+    "today"
+  ]);
+  const latestPageId = recordTask(latestAdd.page_id);
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+  runWrapper([
+    "move-task",
+    "--page-id",
+    latestPageId,
+    "--due-date",
+    NEXT_DAY
+  ]);
+
+  const latest = runWrapper(["find-task", "--title-exact", duplicateTitle, "--latest"]);
+  const first = runWrapper(["find-task", "--title-exact", duplicateTitle, "--first"]);
+  const exactSearch = runWrapper(["search-tasks", "--title-exact", duplicateTitle]);
+  const wildcardSearch = runWrapper(["search-tasks", "--match", `*${duplicateTitle}*`]);
+  const pageLookup = runWrapper(["find-task", "--page-id", firstPageId]);
+
+  assert(latest.row.page_id === latestPageId, "find-task --latest did not pick the newest exact-title task");
+  assert(first.row.page_id === firstPageId, "find-task --first did not pick the oldest exact-title task");
+  assert(exactSearch.count === 2, "search-tasks --title-exact did not return both duplicate tasks");
+  assert(wildcardSearch.count === 2, "search-tasks wildcard did not return both duplicate tasks");
+  assert(pageLookup.row.page_id === firstPageId, "find-task --page-id did not return the requested task");
+  assert(pageLookup.row.schedule_state === "unscheduled", "find-task returned the wrong schedule state for a new unscheduled task");
+
+  return {
+    unique_page_id: uniquePageId,
+    duplicate_count: exactSearch.count,
+    latest_page_id: latest.row.page_id,
+    first_page_id: first.row.page_id
   };
 });
 
@@ -537,6 +614,69 @@ await step("calendar-lifecycle", async () => {
   };
 });
 
+await step("verify-task-and-verify-flows", async () => {
+  const capture = runWrapper([
+    "capture",
+    "--title",
+    title("Verify Flow"),
+    "--date",
+    BASE_DATE,
+    "--horizon",
+    "today",
+    "--needs-calendar",
+    "true",
+    "--scheduling-mode",
+    "flexible_block",
+    "--start",
+    `${NEXT_DAY}T16:00:00+02:00`,
+    "--end",
+    `${NEXT_DAY}T16:30:00+02:00`,
+    "--verify"
+  ]);
+  const pageId = recordTask(capture.page_id);
+  assert(capture.verified === true, "capture --verify did not verify");
+  assert(capture.verification.actual.schedule_synced === true, "capture --verify did not prove sync");
+
+  const verifyScheduled = runWrapper([
+    "verify-task",
+    "--page-id",
+    pageId,
+    "--scheduled",
+    "true",
+    "--linked",
+    "true",
+    "--schedule-synced",
+    "true"
+  ]);
+  assert(verifyScheduled.verified === true, "verify-task scheduled proof failed");
+
+  const removed = runWrapper(["remove-schedule", "--page-id", pageId, "--verify"]);
+  assert(removed.verified === true, "remove-schedule --verify did not verify");
+  assert(removed.verification.actual.calendar_event_status === "cancelled", "remove-schedule --verify did not confirm cancellation");
+
+  const set = runWrapper([
+    "set-schedule",
+    "--page-id",
+    pageId,
+    "--start",
+    `${NEXT_DAY}T17:00:00+02:00`,
+    "--end",
+    `${NEXT_DAY}T17:30:00+02:00`,
+    "--verify"
+  ]);
+  assert(set.verified === true, "set-schedule --verify did not verify");
+
+  const deleted = runWrapper(["delete-task", "--page-id", pageId, "--verify"]);
+  assert(deleted.verified === true, "delete-task --verify did not verify");
+  assert(deleted.verification.actual.archived === true, "delete-task --verify did not confirm archived state");
+
+  return {
+    page_id: pageId,
+    captured_event_id: capture.calendar_event_id,
+    reset_event_id: set.calendar_event_id
+  };
+});
+
 await step("explicit-link-schedule", async () => {
   const summary = title("Direct Link");
   const start = "2026-03-22T14:00:00+02:00";
@@ -809,6 +949,4 @@ console.log(JSON.stringify({
   results
 }, null, 2));
 
-if (failures.length > 0) {
-  process.exitCode = 1;
-}
+process.exit(failures.length > 0 ? 1 : 0);

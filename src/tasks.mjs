@@ -20,7 +20,8 @@ import {
   numberProperty,
   resolveRuntimePath,
   richTextProperty,
-  selectProperty
+  selectProperty,
+  sleep
 } from "./util.mjs";
 
 const HORIZON_ORDER = {
@@ -110,6 +111,37 @@ export function summary(row) {
   };
 }
 
+export function scheduleStateOf(task) {
+  const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
+  const scheduledEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
+  const calendarEventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+
+  if (scheduledStart && scheduledEnd && calendarEventId) return "scheduled_linked";
+  if (scheduledStart && scheduledEnd) return "scheduled_unlinked";
+  if (calendarEventId) return "linked_without_schedule";
+  return "unscheduled";
+}
+
+export function taskLookupSummary(task) {
+  return {
+    page_id: task.id,
+    title: task.title,
+    archived: Boolean(task.archived),
+    stage: task.properties[TASK_FIELDS.stage] || null,
+    status: task.properties[TASK_FIELDS.status] || null,
+    horizon: task.properties[TASK_FIELDS.horizon] || null,
+    type: task.properties[TASK_FIELDS.type] || null,
+    repeat_mode: repeatModeOf(task),
+    schedule_state: scheduleStateOf(task),
+    needs_calendar: task.properties[TASK_FIELDS.needsCalendar] === true,
+    calendar_event_id: task.properties[TASK_FIELDS.calendarEventId] || null,
+    scheduled_start: dateStart(task.properties[TASK_FIELDS.scheduledStart]),
+    scheduled_end: dateStart(task.properties[TASK_FIELDS.scheduledEnd]),
+    created_time: task.created_time || null,
+    last_edited_time: task.last_edited_time || null
+  };
+}
+
 export function resolveTaskView(rawView) {
   const view = TASK_VIEW_ALIASES[rawView] || rawView;
   const spec = TASK_VIEW_SPECS[view];
@@ -117,16 +149,85 @@ export function resolveTaskView(rawView) {
   return { view, spec };
 }
 
-export function selectRow(rows, query, label) {
-  const q = normalize(query);
-  const exact = rows.filter((row) => normalize(row.title) === q);
-  if (exact.length === 1) return exact[0];
-  if (exact.length > 1) die(`multiple ${label} exact matches for "${query}": ${exact.map((r) => r.title).join(", ")}`);
+function taskQuerySpec(args) {
+  const exactTitle = args["title-exact"];
+  const query = exactTitle || args.match || args.title || args._.join(" ");
+  return {
+    query,
+    exact: Boolean(exactTitle),
+    latest: args.latest === true,
+    first: args.first === true,
+    includeArchived: args["include-archived"] === true
+  };
+}
 
-  const partial = rows.filter((row) => normalize(row.title).includes(q));
-  if (partial.length === 1) return partial[0];
-  if (partial.length === 0) die(`no ${label} matched "${query}"`);
-  die(`multiple ${label} matched "${query}": ${partial.map((r) => r.title).join(", ")}`);
+function sortRowsByRecency(rows, direction = "desc") {
+  const factor = direction === "asc" ? 1 : -1;
+  const originalIndex = new Map(rows.map((row, index) => [row.id, index]));
+  return [...rows].sort((a, b) => {
+    const aEdited = Date.parse(a.last_edited_time || a.created_time || "");
+    const bEdited = Date.parse(b.last_edited_time || b.created_time || "");
+    if (!Number.isNaN(aEdited) && !Number.isNaN(bEdited) && aEdited !== bEdited) {
+      return (aEdited - bEdited) * factor;
+    }
+    const aCreated = Date.parse(a.created_time || "");
+    const bCreated = Date.parse(b.created_time || "");
+    if (!Number.isNaN(aCreated) && !Number.isNaN(bCreated) && aCreated !== bCreated) {
+      return (aCreated - bCreated) * factor;
+    }
+    const aIndex = originalIndex.get(a.id) ?? 0;
+    const bIndex = originalIndex.get(b.id) ?? 0;
+    if (aIndex !== bIndex) {
+      return (aIndex - bIndex) * factor;
+    }
+    if (a.id !== b.id) {
+      return a.id.localeCompare(b.id) * factor;
+    }
+    return (a.title || "").localeCompare(b.title || "") * factor;
+  });
+}
+
+export function hasPatternSyntax(query) {
+  return /[*?]/.test(String(query || ""));
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
+function patternRegex(query) {
+  const source = [...normalize(query)]
+    .map((char) => {
+      if (char === "*") return ".*";
+      if (char === "?") return ".";
+      return escapeRegex(char);
+    })
+    .join("");
+  return new RegExp(`^${source}$`);
+}
+
+export function matchingRows(rows, query, { exact = false } = {}) {
+  const q = normalize(query);
+  if (!q) return [];
+
+  const exactMatches = rows.filter((row) => normalize(row.title) === q);
+  if (exactMatches.length > 0 || exact === true) return exactMatches;
+
+  if (!exact && hasPatternSyntax(query)) {
+    const regex = patternRegex(query);
+    const patternMatches = rows.filter((row) => regex.test(normalize(row.title)));
+    if (patternMatches.length > 0) return patternMatches;
+  }
+
+  if (exact) return [];
+  return rows.filter((row) => normalize(row.title).includes(q));
+}
+
+export function selectRow(rows, query, label, options = {}) {
+  const matches = matchingRows(rows, query, options);
+  if (matches.length === 1) return matches[0];
+  if (matches.length === 0) die(`no ${label} matched "${query}"`);
+  die(`multiple ${label} matched "${query}": ${matches.map((r) => r.title).join(", ")}`);
 }
 
 export function resolveRelation(kind, name) {
@@ -140,24 +241,165 @@ export function resolveRelationArg(kind, args, nameFlag, idFlag) {
   return resolveRelation(kind, args[nameFlag]);
 }
 
-export function matchTask(args) {
-  const rows = mirrorRows("tasks");
-  if (args["page-id"]) {
-    const row = rows.find((item) => item.id === args["page-id"]);
-    if (!row) return getPage(args["page-id"]);
-    return row;
+function liveRows(kind) {
+  const dataSourceId = board().databases[kind]?.data_source_id;
+  if (!dataSourceId) return [];
+  return queryDataSourceRows(dataSourceId);
+}
+
+function liveMatchesWithRetry(kind, query, options = {}) {
+  const shouldRetry = options.exact === true || hasPatternSyntax(query);
+  const attempts = shouldRetry ? 3 : 1;
+  const merged = new Map();
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const freshRows = liveRows(kind);
+    const freshMatches = matchingRows(freshRows, query, options);
+    for (const row of freshMatches) merged.set(row.id, row);
+    if (!shouldRetry || freshMatches.length > 1 || attempt === attempts - 1) {
+      break;
+    }
+    sleep(250);
   }
-  const query = args.match || args.title || args._.join(" ");
-  if (!query) die("missing --match");
-  return selectRow(rows, query, "task");
+
+  return [...merged.values()];
+}
+
+function selectRowsWithSelection(rows, query, label, { latest = false, first = false } = {}) {
+  if (rows.length === 0) die(`no ${label} matched "${query}"`);
+  if (latest && first) die(`cannot use both --latest and --first for ${label} lookup`);
+  if (latest) return [sortRowsByRecency(rows, "desc")[0]];
+  if (first) return [sortRowsByRecency(rows, "asc")[0]];
+  if (rows.length === 1) return rows;
+  die(`multiple ${label} matched "${query}": ${rows.map((row) => row.title).join(", ")}`);
+}
+
+function selectRowsWithLiveFallback(kind, query, label, options = {}) {
+  const freshMatches = liveMatchesWithRetry(kind, query, options);
+  if (freshMatches.length > 0) return selectRowsWithSelection(freshMatches, query, label, options);
+
+  const cachedRows = mirrorRows(kind);
+  const cachedMatches = matchingRows(cachedRows, query, options);
+  return selectRowsWithSelection(cachedMatches, query, label, options);
+}
+
+export function searchRowsWithLiveFallback(kind, query, options = {}) {
+  const freshMatches = liveMatchesWithRetry(kind, query, options);
+  const visibleFreshMatches = filterArchivedMatches(freshMatches, options);
+  if (visibleFreshMatches.length > 0) return visibleFreshMatches;
+
+  const cachedRows = mirrorRows(kind);
+  const cachedMatches = matchingRows(cachedRows, query, options);
+  return filterArchivedMatches(cachedMatches, options);
+}
+
+export function searchTasks(args) {
+  if (args["page-id"]) {
+    return [getPage(args["page-id"])];
+  }
+  const spec = taskQuerySpec(args);
+  if (!spec.query) die("missing task query");
+  const matches = searchRowsWithLiveFallback("tasks", spec.query, { exact: spec.exact });
+  if (matches.length === 0) die(`no task matched "${spec.query}"`);
+  if (spec.latest || spec.first) {
+    return selectRowsWithSelection(matches, spec.query, "task", spec);
+  }
+  return matches;
+}
+
+export function findTask(args) {
+  if (args["page-id"]) {
+    return getPage(args["page-id"]);
+  }
+  const spec = taskQuerySpec(args);
+  if (!spec.query) die("missing task query");
+  const matches = searchRowsWithLiveFallback("tasks", spec.query, { exact: spec.exact });
+  return selectRowsWithSelection(matches, spec.query, "task", spec)[0];
+}
+
+export function taskQueryLabel(args) {
+  return taskQuerySpec(args).query || null;
+}
+
+export function taskQueryOptions(args) {
+  const spec = taskQuerySpec(args);
+  return {
+    exact: spec.exact,
+    latest: spec.latest,
+    first: spec.first,
+    include_archived: spec.includeArchived
+  };
+}
+
+function selectRowsWithLiveFallbackForTasks(args) {
+  const spec = taskQuerySpec(args);
+  if (!spec.query) die("missing task query");
+  return selectRowsWithLiveFallback("tasks", spec.query, "task", {
+    exact: spec.exact,
+    latest: spec.latest,
+    first: spec.first,
+    includeArchived: spec.includeArchived
+  });
+}
+
+function selectRowsWithLiveFallbackForMany(args) {
+  const spec = taskQuerySpec(args);
+  if (!spec.query) die("missing task query");
+  const freshMatches = searchRowsWithLiveFallback("tasks", spec.query, {
+    exact: spec.exact,
+    includeArchived: spec.includeArchived
+  });
+  if (freshMatches.length === 0) die(`no task matched "${spec.query}"`);
+  return freshMatches;
+}
+
+function filterArchivedMatches(rows, options = {}) {
+  if (options.includeArchived) return rows;
+  return rows
+    .map((row) => {
+      try {
+        return getPage(row.id);
+      } catch {
+        return row;
+      }
+    })
+    .filter((row) => !isArchivedTask(row));
+}
+
+export function matchTask(args) {
+  return findTask(args);
+}
+
+export function matchTasks(args) {
+  if (args["page-id"]) {
+    return [getPage(args["page-id"])];
+  }
+  const spec = taskQuerySpec(args);
+  if (spec.latest || spec.first) {
+    return selectRowsWithLiveFallbackForTasks(args);
+  }
+  return selectRowsWithLiveFallbackForMany(args);
 }
 
 export function isDoneTask(task) {
   return (
-    task.archived === true ||
+    isArchivedTask(task) ||
     task.properties[TASK_FIELDS.status] === "done" ||
-    task.properties[TASK_FIELDS.stage] === "done" ||
+    task.properties[TASK_FIELDS.stage] === "done"
+  );
+}
+
+export function isArchivedTask(task) {
+  return (
+    task.archived === true ||
     task.properties[TASK_FIELDS.stage] === "archived"
+  );
+}
+
+export function isNonRecurringOneTimeTask(task) {
+  return (
+    task.properties[TASK_FIELDS.type] === "one_time" &&
+    repeatModeOf(task) === "none"
   );
 }
 

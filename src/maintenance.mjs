@@ -122,12 +122,31 @@ function weekdayName(date) {
   return new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`));
 }
 
+function endOfWeek(date) {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + (6 - value.getUTCDay()));
+  return value.toISOString().slice(0, 10);
+}
+
+function datesInclusive(start, end) {
+  const rows = [];
+  let cursor = start;
+  while (cursor <= end) {
+    rows.push(cursor);
+    cursor = addDays(cursor, 1);
+  }
+  return rows;
+}
+
+function weekdayAllowed(task, date) {
+  const repeatDays = task.properties[TASK_FIELDS.repeatDays] || [];
+  if (repeatDays.length === 0) return true;
+  return repeatDays.includes(weekdayName(date));
+}
+
 function candidateWindowsForDate(task, date) {
   const mode = task.properties[TASK_FIELDS.schedulingMode] || null;
-  const repeatDays = task.properties[TASK_FIELDS.repeatDays] || [];
-  const dayName = weekdayName(date);
-
-  if (repeatDays.length > 0 && !repeatDays.includes(dayName)) return [];
+  if (!weekdayAllowed(task, date)) return [];
   if (mode === "hard_time" || mode === "routine_window" || mode === "list_only") return [];
 
   const day = new Date(`${date}T12:00:00Z`).getUTCDay();
@@ -271,6 +290,38 @@ function schedulingDecisionShape(task, date, reason) {
   };
 }
 
+function weeklyRepeatPressure(task, date) {
+  if (repeatModeOf(task) !== "manual_repeat") return null;
+  if (task.properties[TASK_FIELDS.repeatWindow] !== "week") return null;
+  if (!inferNeedsCalendar(task)) return null;
+  if ((task.properties[TASK_FIELDS.schedulingMode] || null) === "list_only") return null;
+
+  const target = Number(task.properties[TASK_FIELDS.repeatTargetCount] || 0);
+  const progress = Number(task.properties[TASK_FIELDS.repeatProgress] || 0);
+  const remainingNeeded = Math.max(0, target - progress);
+  if (target <= 0 || remainingNeeded <= 0) return null;
+
+  const weekEnd = endOfWeek(date);
+  const validDates = datesInclusive(date, weekEnd).filter((day) => weekdayAllowed(task, day));
+  const remainingValidDays = validDates.length;
+  if (remainingValidDays <= 0) return null;
+
+  const urgency = remainingNeeded >= remainingValidDays ? "mandatory_now" : "optional_this_week";
+  const explanation =
+    urgency === "mandatory_now"
+      ? `needs ${remainingNeeded} more this week and only ${remainingValidDays} valid day${remainingValidDays === 1 ? "" : "s"} remain`
+      : `needs ${remainingNeeded} more this week and still has ${remainingValidDays} valid day${remainingValidDays === 1 ? "" : "s"} left`;
+
+  return {
+    ...taskReviewShape(task),
+    remaining_needed: remainingNeeded,
+    remaining_valid_days: remainingValidDays,
+    valid_dates: validDates,
+    urgency,
+    explanation
+  };
+}
+
 function countBy(items, keyFn) {
   const counts = {};
   for (const item of items) {
@@ -286,6 +337,52 @@ function resolveRows(rows, args, label) {
   }
   if (args.match) return [selectRow(rows, args.match, label)];
   return rows;
+}
+
+function resolveTaskRows(args) {
+  return resolveRows(mirrorRows("tasks"), args, "task");
+}
+
+function parseClockMinutes(value) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function hardTimeWindowFromTask(task) {
+  const notes = task.properties[TASK_FIELDS.reviewNotes] || "";
+  const match = String(notes).match(/(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})/);
+  if (!match) return null;
+  const startMinutes = parseClockMinutes(match[1]);
+  const endMinutes = parseClockMinutes(match[2]);
+  if (startMinutes === null || endMinutes === null || endMinutes <= startMinutes) return null;
+  return { startMinutes, endMinutes, source: "review-notes-time-range" };
+}
+
+function hardTimeProposal(task, dateWindow, fallbackDate) {
+  const window = hardTimeWindowFromTask(task);
+  if (!window) return null;
+  const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
+  const targetDate =
+    dueDate && dateWindow.includes(dueDate)
+      ? dueDate
+      : task.properties[TASK_FIELDS.horizon] === "today"
+        ? fallbackDate
+        : dateWindow[0] || fallbackDate;
+  if (!targetDate || !dateWindow.includes(targetDate)) return null;
+  return {
+    page_id: task.id,
+    title: task.title,
+    date: targetDate,
+    start: isoLocal(targetDate, window.startMinutes),
+    end: isoLocal(targetDate, window.endMinutes),
+    duration_minutes: window.endMinutes - window.startMinutes,
+    scheduling_mode: "hard_time",
+    source: window.source
+  };
 }
 
 export function cmdShowCompleted(args) {
@@ -309,7 +406,7 @@ function nextManualRepeatDate(task, date) {
 export function cmdRefreshManualRepeat(args) {
   const date = normalizeDateArg(args.date);
   const apply = args.apply === true;
-  const tasks = mirrorRows("tasks");
+  const tasks = resolveTaskRows(args);
   const candidates = tasks
     .filter((task) => {
       if (repeatModeOf(task) !== "manual_repeat") return false;
@@ -386,7 +483,7 @@ export function cmdRefreshManualRepeat(args) {
 export function cmdCloseDay(args) {
   const date = normalizeDateArg(args.date);
   const carryTo = args["carry-to"] || null;
-  const tasks = mirrorRows("tasks").filter(
+  const tasks = resolveTaskRows(args).filter(
     (task) => task.properties[TASK_FIELDS.horizon] === "today" && task.archived !== true
   );
 
@@ -494,7 +591,7 @@ export function cmdTriageInbox(args) {
   const limit = args.limit ? Number(args.limit) : null;
   const baseDate = normalizeDateArg(args.date);
   const apply = args.apply === true;
-  const inbox = mirrorRows("tasks").filter(
+  const inbox = resolveTaskRows(args).filter(
     (task) => task.properties[TASK_FIELDS.stage] === "inbox" && task.archived !== true
   );
   const selected = limit ? inbox.slice(0, limit) : inbox;
@@ -548,7 +645,7 @@ export function cmdTriageInbox(args) {
 export function cmdReconcileCalendar(args) {
   const applyClearStale = args["apply-clear-stale"] === true;
   const applyLinkMatches = args["apply-link-matches"] === true;
-  const tasks = mirrorRows("tasks");
+  const tasks = resolveTaskRows(args);
 
   const missingScheduleAndEvent = [];
   const scheduledWithoutEvent = [];
@@ -724,7 +821,7 @@ export function cmdReviewStale(args) {
   const date = normalizeDateArg(args.date);
   const missThreshold = args["miss-threshold"] ? Number(args["miss-threshold"]) : 3;
   const blockedDays = args["blocked-days"] ? Number(args["blocked-days"]) : 7;
-  const tasks = mirrorRows("tasks").filter((task) => !isDoneTask(task));
+  const tasks = resolveTaskRows(args).filter((task) => !isDoneTask(task));
   const validProjectIds = new Set(mirrorRows("projects").map((row) => row.id));
   const validGoalIds = new Set(mirrorRows("goals").map((row) => row.id));
 
@@ -951,7 +1048,8 @@ export function cmdSchedulingDecisions(args) {
   const days = Math.max(1, Number(args.days || 3));
   const limit = Math.max(1, Number(args.limit || 12));
   const windowEnd = addDays(date, days - 1);
-  const tasks = mirrorRows("tasks")
+  const dateWindow = Array.from({ length: days }, (_, index) => addDays(date, index));
+  const tasks = resolveTaskRows(args)
     .filter((task) => isActiveTask(task) && task.properties[TASK_FIELDS.stage] !== "blocked")
     .filter((task) => inferNeedsCalendar(task))
     .filter((task) => !hasCalendarFields(task))
@@ -960,13 +1058,32 @@ export function cmdSchedulingDecisions(args) {
     .sort((a, b) => comparePlannedTasks(a, b, date))
     .slice(0, limit);
 
+  const hardTimeReady = [];
   const hardTimeOrWindow = [];
   const flexibleToDiscuss = [];
+  const weeklyRepeatMandatory = [];
+  const weeklyRepeatOptional = [];
 
   for (const task of tasks) {
+    const repeatPressure = weeklyRepeatPressure(task, date);
+    if (repeatPressure) {
+      if (repeatPressure.urgency === "mandatory_now") weeklyRepeatMandatory.push(repeatPressure);
+      else weeklyRepeatOptional.push(repeatPressure);
+    }
+
     const mode = task.properties[TASK_FIELDS.schedulingMode] || "flexible_block";
     if (mode === "hard_time") {
-      hardTimeOrWindow.push(schedulingDecisionShape(task, date, "hard-time-needs-clear-time"));
+      const proposal = hardTimeProposal(task, dateWindow, date);
+      if (proposal) {
+        hardTimeReady.push({
+          ...schedulingDecisionShape(task, date, "hard-time-ready"),
+          suggested_start: proposal.start,
+          suggested_end: proposal.end,
+          source: proposal.source
+        });
+      } else {
+        hardTimeOrWindow.push(schedulingDecisionShape(task, date, "hard-time-needs-clear-time"));
+      }
       continue;
     }
     if (mode === "routine_window") {
@@ -984,14 +1101,21 @@ export function cmdSchedulingDecisions(args) {
     window_end: windowEnd,
     counts: {
       considered: tasks.length,
+      hard_time_ready: hardTimeReady.length,
       hard_time_or_window: hardTimeOrWindow.length,
-      flexible_to_discuss: flexibleToDiscuss.length
+      flexible_to_discuss: flexibleToDiscuss.length,
+      weekly_repeat_mandatory: weeklyRepeatMandatory.length,
+      weekly_repeat_optional: weeklyRepeatOptional.length
     },
+    hard_time_ready: hardTimeReady,
     hard_time_or_window: hardTimeOrWindow,
     flexible_to_discuss: flexibleToDiscuss,
+    weekly_repeat_mandatory: weeklyRepeatMandatory,
+    weekly_repeat_optional: weeklyRepeatOptional,
     notes: [
       "hard_time items may be scheduled by the agent when the intended time is already clear from task data, prior context, or an explicit user instruction",
-      "flexible_block items should normally be surfaced in planning conversations instead of being silently auto-placed by code"
+      "flexible_block items should normally be surfaced in planning conversations instead of being silently auto-placed by code",
+      "weekly grouped-repeat tasks should still be surfaced in daily planning; when remaining valid days equal remaining needed sessions, they should be treated as mandatory for this week"
     ]
   }, null, 2));
 }
@@ -1002,7 +1126,8 @@ export function cmdScheduleSweep(args) {
   const limit = args.limit ? Number(args.limit) : 8;
   const maxDailyMinutes = args["max-daily-minutes"] ? Number(args["max-daily-minutes"]) : 360;
   const apply = args.apply === true;
-  const tasks = mirrorRows("tasks").filter((task) => isActiveTask(task) && task.properties[TASK_FIELDS.stage] !== "blocked");
+  const applyHardTime = args["apply-hard-time"] === true;
+  const tasks = resolveTaskRows(args).filter((task) => isActiveTask(task) && task.properties[TASK_FIELDS.stage] !== "blocked");
   const dateWindow = Array.from({ length: Math.max(1, days) }, (_, index) => {
     const value = new Date(`${date}T00:00:00Z`);
     value.setUTCDate(value.getUTCDate() + index);
@@ -1060,10 +1185,40 @@ export function cmdScheduleSweep(args) {
 
   for (const task of candidates) {
     const mode = task.properties[TASK_FIELDS.schedulingMode] || null;
-    if (mode === "hard_time" || mode === "routine_window") {
+    if (mode === "hard_time") {
+      const proposal = hardTimeProposal(task, dateWindow, date);
+      if (!proposal) {
+        skipped.push({
+          ...taskReviewShape(task),
+          reason: "needs-explicit-time"
+        });
+        continue;
+      }
+
+      proposals.push(proposal);
+
+      if (applyHardTime) {
+        const event = createCalendarEvent(task.title, proposal.start, proposal.end);
+        updatePageProperties(task.id, {
+          [TASK_FIELDS.scheduledStart]: dateProperty(proposal.start),
+          [TASK_FIELDS.scheduledEnd]: dateProperty(proposal.end),
+          [TASK_FIELDS.calendarEventId]: richTextProperty(event.id),
+          [TASK_FIELDS.status]: selectProperty("scheduled"),
+          [TASK_FIELDS.stage]: selectProperty("active"),
+          [TASK_FIELDS.scheduleType]: selectProperty(task.properties[TASK_FIELDS.scheduleType] || "hard")
+        });
+        scheduled.push({
+          ...proposal,
+          calendar_event_id: event.id
+        });
+      }
+      continue;
+    }
+
+    if (mode === "routine_window") {
       skipped.push({
         ...taskReviewShape(task),
-        reason: mode === "hard_time" ? "needs-explicit-time" : "needs-explicit-window"
+        reason: "needs-explicit-window"
       });
       continue;
     }
@@ -1134,6 +1289,7 @@ export function cmdScheduleSweep(args) {
     limit,
     max_daily_minutes: maxDailyMinutes,
     apply,
+    apply_hard_time: applyHardTime,
     counts: {
       candidates: candidates.length,
       proposed: proposals.length,
@@ -1145,7 +1301,8 @@ export function cmdScheduleSweep(args) {
     skipped,
     notes: [
       "schedule-sweep only auto-places tasks that are safe to place heuristically",
-      "hard_time and routine_window tasks remain visible in needs_scheduling until explicit timing rules are set"
+      "routine_window tasks remain visible in needs_scheduling until explicit timing rules are set",
+      "hard_time tasks can be auto-placed when apply-hard-time is set and a clear clock range is already stored on the task"
     ]
   }, null, 2));
 }

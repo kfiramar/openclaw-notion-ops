@@ -1,8 +1,9 @@
 import { TASK_FIELDS } from "./config.mjs";
-import { createCalendarEvent, deleteCalendarEvent, updateCalendarEvent } from "./calendar.mjs";
-import { logCompletion } from "./history.mjs";
+import { createCalendarEvent, deleteCalendarEvent, fetchCalendarEvent, updateCalendarEvent } from "./calendar.mjs";
+import { dateStart, logCompletion } from "./history.mjs";
 import {
   archivePage,
+  getPage,
   kickMirrorSync,
   notionRequest,
   runMirrorSync,
@@ -14,17 +15,24 @@ import {
   clearCalendarProperties,
   defaultStageForTask,
   defaultHorizonForCadence,
+  findTask,
   inferHorizon,
   inferNeedsCalendar,
   inferRepeatModeFromShape,
   inferTypeFromShape,
+  isNonRecurringOneTimeTask,
   listRows,
   matchTask,
+  matchTasks,
   mirrorRows,
   plusCadence,
   repeatModeOf,
   resolveRelationArg,
   resolveTaskView,
+  searchTasks,
+  taskLookupSummary,
+  taskQueryLabel,
+  taskQueryOptions,
   summary
 } from "./tasks.mjs";
 import {
@@ -67,6 +75,146 @@ function assertScheduleRange(label, start, end, { requireBoth = false } = {}) {
   }
 }
 
+function normalizedInstant(value) {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? String(value) : new Date(parsed).toISOString();
+}
+
+function startOfWeek(date) {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() - value.getUTCDay());
+  return value.toISOString().slice(0, 10);
+}
+
+function repeatAnchorDate({ repeatMode = null, cadence = null, repeatWindow = null, baseDate }) {
+  if (!baseDate) return null;
+  if (repeatMode === "manual_repeat") {
+    if (repeatWindow === "week") return startOfWeek(baseDate);
+    if (repeatWindow === "month") return `${baseDate.slice(0, 7)}-01`;
+    if (repeatWindow === "year") return `${baseDate.slice(0, 4)}-01-01`;
+    return baseDate;
+  }
+  if (repeatMode === "cadence" && cadence && cadence !== "none") {
+    if (cadence === "monthly") return `${baseDate.slice(0, 7)}-01`;
+    if (cadence === "weekly") return startOfWeek(baseDate);
+    return baseDate;
+  }
+  return null;
+}
+
+function emitJson(payload) {
+  console.log(JSON.stringify(payload, null, 2));
+}
+
+function lookupResultPayload(action, rows, extra = {}) {
+  return {
+    ok: true,
+    action,
+    query: taskQueryLabel(extra.args || {}) || null,
+    selectors: taskQueryOptions(extra.args || {}),
+    count: rows.length,
+    rows: rows.map(taskLookupSummary),
+    ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== "args"))
+  };
+}
+
+function pushCheck(checks, name, expected, actual) {
+  if (expected === undefined) return;
+  checks.push({
+    name,
+    expected,
+    actual,
+    ok: expected === actual
+  });
+}
+
+function verifyTaskState(pageId, {
+  expected = {},
+  priorCalendarEventId = null
+} = {}) {
+  const task = getPage(pageId);
+  const taskStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
+  const taskEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
+  const currentEventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+  const linked = Boolean(currentEventId);
+  const scheduled = Boolean(taskStart) && Boolean(taskEnd);
+  const lookupEventId = currentEventId || priorCalendarEventId || "";
+
+  let lookup = null;
+  let event = null;
+  if (lookupEventId) {
+    lookup = fetchCalendarEvent(lookupEventId);
+    if (lookup.ok) event = lookup.event || null;
+  }
+
+  const calendarStart = event?.start?.dateTime || event?.start?.date || null;
+  const calendarEnd = event?.end?.dateTime || event?.end?.date || null;
+  const calendarStatus = event?.status || (lookup?.notFound ? "not_found" : null);
+  const scheduleSynced =
+    linked &&
+    scheduled &&
+    Boolean(event) &&
+    calendarStatus !== "cancelled" &&
+    normalizedInstant(taskStart) === normalizedInstant(calendarStart) &&
+    normalizedInstant(taskEnd) === normalizedInstant(calendarEnd);
+
+  const actual = {
+    ...taskLookupSummary(task),
+    linked,
+    scheduled,
+    schedule_synced: scheduleSynced,
+    calendar_lookup_event_id: lookupEventId || null,
+    calendar_event_status: calendarStatus,
+    calendar_start: calendarStart,
+    calendar_end: calendarEnd,
+    lookup_ok: lookup ? lookup.ok === true : null,
+    not_found: lookup ? Boolean(lookup.notFound) : false
+  };
+
+  const checks = [];
+  pushCheck(checks, "archived", expected.archived, actual.archived);
+  pushCheck(checks, "scheduled", expected.scheduled, actual.scheduled);
+  pushCheck(checks, "linked", expected.linked, actual.linked);
+  pushCheck(checks, "stage", expected.stage, actual.stage);
+  pushCheck(checks, "status", expected.status, actual.status);
+  pushCheck(checks, "horizon", expected.horizon, actual.horizon);
+  pushCheck(checks, "schedule_state", expected.schedule_state, actual.schedule_state);
+  pushCheck(checks, "schedule_synced", expected.schedule_synced, actual.schedule_synced);
+  pushCheck(checks, "calendar_event_status", expected.calendar_event_status, actual.calendar_event_status);
+  pushCheck(checks, "calendar_event_id", expected.calendar_event_id, actual.calendar_event_id);
+
+  return {
+    ok: true,
+    action: "verify-task",
+    page_id: task.id,
+    task: task.title,
+    verified: checks.every((check) => check.ok),
+    expected,
+    actual,
+    checks
+  };
+}
+
+function verifyFlagEnabled(args) {
+  return args.verify === true || args.verify === "true";
+}
+
+function expectedVerifyArgs(args) {
+  return {
+    archived: args.archived === undefined ? undefined : boolOrNull(args.archived),
+    scheduled: args.scheduled === undefined ? undefined : boolOrNull(args.scheduled),
+    linked: args.linked === undefined ? undefined : boolOrNull(args.linked),
+    stage: args.stage || undefined,
+    status: args.status || undefined,
+    horizon: args.horizon || undefined,
+    schedule_state: args["schedule-state"] || undefined,
+    schedule_synced: args["schedule-synced"] === undefined ? undefined : boolOrNull(args["schedule-synced"]),
+    calendar_event_status: args["calendar-event-status"] || undefined,
+    calendar_event_id: args["calendar-event-id"] || undefined
+  };
+}
+
 export function cmdShow(args) {
   const rows = mirrorRows("tasks");
   const rawView = args.view || "today";
@@ -77,13 +225,37 @@ export function cmdShow(args) {
 
 export function cmdInspectTask(args) {
   const task = matchTask(args);
-  console.log(JSON.stringify(task, null, 2));
+  emitJson(task);
+}
+
+export function cmdFindTask(args) {
+  const task = findTask(args);
+  emitJson({
+    ...lookupResultPayload("find-task", [task], { args }),
+    row: taskLookupSummary(task)
+  });
+}
+
+export function cmdSearchTasks(args) {
+  const tasks = searchTasks(args);
+  emitJson(lookupResultPayload("search-tasks", tasks, { args }));
+}
+
+export function cmdVerifyTask(args) {
+  const task = matchTask(args);
+  const expected = expectedVerifyArgs(args);
+  const verification = verifyTaskState(task.id, {
+    expected,
+    priorCalendarEventId: args["prior-event-id"] || null
+  });
+  emitJson(verification);
 }
 
 export function cmdAddTask(args) {
   const b = board();
   const title = args.title || args._.join(" ");
   if (!title) throw new Error('usage: add-task --title "..." [--horizon ...]');
+  const baseDate = normalizeDateArg(args.date);
   const repeatMode = inferRepeatModeFromShape({
     repeatMode: args["repeat-mode"],
     type: args.type,
@@ -95,6 +267,14 @@ export function cmdAddTask(args) {
     repeatMode,
     cadence: args.cadence
   });
+  const implicitDueDate = repeatAnchorDate({
+    repeatMode,
+    cadence: args.cadence || null,
+    repeatWindow: args["repeat-window"] || null,
+    baseDate
+  });
+  const dueDate = isoDate(args["due-date"] || implicitDueDate || null);
+  const nextDueAt = isoDate(args["next-due-at"] || dueDate || null);
 
   const payload = {
     parent: { data_source_id: b.databases.tasks.data_source_id },
@@ -116,8 +296,8 @@ export function cmdAddTask(args) {
       [TASK_FIELDS.repeatTargetCount]: numberProperty(args["repeat-target-count"]),
       [TASK_FIELDS.repeatProgress]: numberProperty(args["repeat-progress"]),
       [TASK_FIELDS.repeatDays]: multiSelectProperty(repeatDays),
-      [TASK_FIELDS.dueDate]: dateProperty(isoDate(args["due-date"] || null)),
-      [TASK_FIELDS.nextDueAt]: dateProperty(isoDate(args["next-due-at"] || null)),
+      [TASK_FIELDS.dueDate]: dateProperty(dueDate),
+      [TASK_FIELDS.nextDueAt]: dateProperty(nextDueAt),
       [TASK_FIELDS.reviewNotes]: richTextProperty(args.notes || ""),
       [TASK_FIELDS.project]: relationProperty(resolveRelationArg("projects", args, "project", "project-id")),
       [TASK_FIELDS.goal]: relationProperty(resolveRelationArg("goals", args, "goal", "goal-id"))
@@ -126,7 +306,7 @@ export function cmdAddTask(args) {
 
   const out = notionRequest("POST", "/v1/pages", payload, true);
   kickMirrorSync();
-  console.log(JSON.stringify({ ok: true, action: "add-task", page_id: out.id, title }, null, 2));
+  emitJson({ ok: true, action: "add-task", page_id: out.id, title });
 }
 
 export function cmdCapture(args) {
@@ -253,7 +433,7 @@ export function cmdCapture(args) {
 
   const out = notionRequest("POST", "/v1/pages", payload, true);
   kickMirrorSync();
-  console.log(JSON.stringify({
+  const result = {
     ok: true,
     action: "capture",
     page_id: out.id,
@@ -273,7 +453,27 @@ export function cmdCapture(args) {
       project_ids: projectIds,
       goal_ids: goalIds
     }
-  }, null, 2));
+  };
+
+  if (verifyFlagEnabled(args)) {
+    result.verification = verifyTaskState(out.id, {
+      expected: scheduledEvent
+        ? {
+            archived: false,
+            scheduled: true,
+            linked: true,
+            schedule_synced: true,
+            calendar_event_id: scheduledEvent.id
+          }
+        : {
+            archived: false,
+            horizon: inferredHorizon
+          }
+    });
+    result.verified = result.verification.verified;
+  }
+
+  emitJson(result);
 }
 
 export function cmdMoveTask(args) {
@@ -542,6 +742,126 @@ export function cmdCompleteTask(args) {
   console.log(JSON.stringify({ ok: true, action: "complete-task", mode: "done", page_id: task.id, task: task.title }, null, 2));
 }
 
+export function cmdArchiveTask(args) {
+  const query = args.match || args.title || args._.join(" ");
+  const shouldAllowMany =
+    args["all-matches"] === true ||
+    (!args["page-id"] && query && /[*?]/.test(String(query)));
+  const tasks = shouldAllowMany ? matchTasks(args) : [matchTask(args)];
+  const archived = [];
+
+  for (const task of tasks) {
+    const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+    if (eventId) {
+      deleteCalendarEvent(eventId);
+    }
+    archivePage(task.id);
+    archived.push({
+      page_id: task.id,
+      task: task.title,
+      removed_calendar_event: Boolean(eventId),
+      calendar_event_id: eventId || null
+    });
+  }
+
+  if (archived.length === 1) {
+    console.log(JSON.stringify({
+      ok: true,
+      action: "archive-task",
+      ...archived[0]
+    }, null, 2));
+    return;
+  }
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "archive-task",
+    mode: "multi-match",
+    query: query || null,
+    count: tasks.length,
+    archived
+  }, null, 2));
+}
+
+export function cmdDeleteTask(args) {
+  const query = args.match || args.title || args._.join(" ");
+  const shouldAllowMany =
+    args["all-matches"] === true ||
+    (!args["page-id"] && query && /[*?]/.test(String(query)));
+  const tasks = shouldAllowMany ? matchTasks(args) : [matchTask(args)];
+  const recurringAllowed = boolOrNull(args["allow-recurring"]) === true;
+  const deleted = [];
+
+  for (const task of tasks) {
+    if (!recurringAllowed && !isNonRecurringOneTimeTask(task)) {
+      throw new Error("delete-task only deletes non-recurring one-time tasks; use remove-schedule for calendar cleanup or pass --allow-recurring explicitly");
+    }
+
+    const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+    if (eventId) {
+      deleteCalendarEvent(eventId);
+    }
+    if (task.properties[TASK_FIELDS.calendarEventId] || task.properties[TASK_FIELDS.scheduledStart] || task.properties[TASK_FIELDS.scheduledEnd]) {
+      const clearedTask = {
+        ...task,
+        properties: {
+          ...task.properties,
+          [TASK_FIELDS.scheduledStart]: null,
+          [TASK_FIELDS.scheduledEnd]: null,
+          [TASK_FIELDS.calendarEventId]: ""
+        }
+      };
+      updatePageProperties(task.id, {
+        ...clearCalendarProperties(),
+        [TASK_FIELDS.status]: selectProperty("todo"),
+        [TASK_FIELDS.stage]: selectProperty(defaultStageForTask(clearedTask))
+      });
+    }
+    archivePage(task.id);
+
+    const result = {
+      page_id: task.id,
+      task: task.title,
+      removed_calendar_event: Boolean(eventId),
+      calendar_event_id: eventId || null,
+      type: task.properties[TASK_FIELDS.type] || null,
+      repeat_mode: repeatModeOf(task),
+      archived: true
+    };
+
+    if (verifyFlagEnabled(args)) {
+      result.verification = verifyTaskState(task.id, {
+        expected: {
+          archived: true,
+          calendar_event_status: eventId ? "cancelled" : undefined
+        },
+        priorCalendarEventId: eventId || null
+      });
+      result.verified = result.verification.verified;
+    }
+
+    deleted.push(result);
+  }
+
+  if (deleted.length === 1) {
+    emitJson({
+      ok: true,
+      action: "delete-task",
+      ...deleted[0]
+    });
+    return;
+  }
+
+  emitJson({
+    ok: true,
+    action: "delete-task",
+    mode: "multi-match",
+    query: query || null,
+    count: deleted.length,
+    deleted
+  });
+}
+
 export function cmdSetSchedule(args) {
   const task = matchTask(args);
   if (!args.start || !args.end) throw new Error('usage: set-schedule --match "..." --start <ISO> --end <ISO>');
@@ -567,7 +887,7 @@ export function cmdSetSchedule(args) {
     [TASK_FIELDS.stage]: selectProperty(args.stage || task.properties[TASK_FIELDS.stage] || "planned"),
     [TASK_FIELDS.calendarEventId]: richTextProperty(event.id)
   });
-  console.log(JSON.stringify({
+  const result = {
     ok: true,
     action: "set-schedule",
     mode: existingEventId ? "updated-existing-event" : "created-new-event",
@@ -576,43 +896,106 @@ export function cmdSetSchedule(args) {
     start: args.start,
     end: args.end,
     calendar_event_id: event.id
-  }, null, 2));
+  };
+
+  if (verifyFlagEnabled(args)) {
+    result.verification = verifyTaskState(task.id, {
+      expected: {
+        archived: false,
+        scheduled: true,
+        linked: true,
+        schedule_synced: true,
+        calendar_event_id: event.id
+      }
+    });
+    result.verified = result.verification.verified;
+  }
+
+  emitJson(result);
 }
 
 export function cmdRemoveSchedule(args) {
-  const task = matchTask(args);
-  const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
-  const hadSchedule =
-    Boolean(task.properties[TASK_FIELDS.scheduledStart]) ||
-    Boolean(task.properties[TASK_FIELDS.scheduledEnd]) ||
-    Boolean(eventId);
-  const clearedTask = {
-    ...task,
-    properties: {
-      ...task.properties,
-      [TASK_FIELDS.scheduledStart]: null,
-      [TASK_FIELDS.scheduledEnd]: null,
-      [TASK_FIELDS.calendarEventId]: ""
+  const query = args.match || args.title || args._.join(" ");
+  const shouldAllowMany =
+    args["all-matches"] === true ||
+    (!args["page-id"] && query && /[*?]/.test(String(query)));
+  const tasks = shouldAllowMany ? matchTasks(args) : [matchTask(args)];
+  const removed = [];
+  const skipped = [];
+
+  for (const task of tasks) {
+    const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+    const hadSchedule =
+      Boolean(task.properties[TASK_FIELDS.scheduledStart]) ||
+      Boolean(task.properties[TASK_FIELDS.scheduledEnd]) ||
+      Boolean(eventId);
+    if (!hadSchedule && tasks.length > 1) {
+      skipped.push({
+        page_id: task.id,
+        task: task.title,
+        reason: "no-schedule"
+      });
+      continue;
     }
-  };
 
-  if (eventId) deleteCalendarEvent(eventId);
+    const clearedTask = {
+      ...task,
+      properties: {
+        ...task.properties,
+        [TASK_FIELDS.scheduledStart]: null,
+        [TASK_FIELDS.scheduledEnd]: null,
+        [TASK_FIELDS.calendarEventId]: ""
+      }
+    };
 
-  updatePageProperties(task.id, {
-    ...clearCalendarProperties(),
-    [TASK_FIELDS.status]: selectProperty(args.status || "todo"),
-    [TASK_FIELDS.stage]: selectProperty(args.stage || defaultStageForTask(clearedTask))
-  });
+    if (eventId) deleteCalendarEvent(eventId);
 
-  console.log(JSON.stringify({
+    updatePageProperties(task.id, {
+      ...clearCalendarProperties(),
+      [TASK_FIELDS.status]: selectProperty(args.status || "todo"),
+      [TASK_FIELDS.stage]: selectProperty(args.stage || defaultStageForTask(clearedTask))
+    });
+
+    removed.push({
+      page_id: task.id,
+      task: task.title,
+      removed_calendar_event: Boolean(eventId),
+      calendar_event_id: eventId || null,
+      had_schedule: hadSchedule
+    });
+  }
+
+  if (removed.length === 1 && skipped.length === 0) {
+    const result = {
+      ok: true,
+      action: "remove-schedule",
+      ...removed[0]
+    };
+    if (verifyFlagEnabled(args)) {
+      result.verification = verifyTaskState(removed[0].page_id, {
+        expected: {
+          archived: false,
+          scheduled: false,
+          linked: false,
+          calendar_event_status: removed[0].calendar_event_id ? "cancelled" : undefined
+        },
+        priorCalendarEventId: removed[0].calendar_event_id || null
+      });
+      result.verified = result.verification.verified;
+    }
+    emitJson(result);
+    return;
+  }
+
+  emitJson({
     ok: true,
     action: "remove-schedule",
-    page_id: task.id,
-    task: task.title,
-    removed_calendar_event: Boolean(eventId),
-    calendar_event_id: eventId || null,
-    had_schedule: hadSchedule
-  }, null, 2));
+    mode: "multi-match",
+    query: query || null,
+    count: tasks.length,
+    removed,
+    skipped
+  });
 }
 
 export function cmdRescheduleTask(args) {
@@ -658,6 +1041,109 @@ export function cmdRescheduleTask(args) {
     end: args.end,
     calendar_event_id: event.id
   }, null, 2));
+}
+
+export function cmdLinkSchedule(args) {
+  const task = matchTask(args);
+  if (!args["event-id"]) throw new Error('usage: link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start <ISO> --end <ISO>');
+  if (!args.start || !args.end) throw new Error('usage: link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start <ISO> --end <ISO>');
+  assertScheduleRange("link-schedule", args.start, args.end, { requireBoth: true });
+
+  updatePageProperties(task.id, {
+    [TASK_FIELDS.scheduledStart]: dateProperty(args.start),
+    [TASK_FIELDS.scheduledEnd]: dateProperty(args.end),
+    [TASK_FIELDS.calendarEventId]: richTextProperty(args["event-id"]),
+    [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
+    [TASK_FIELDS.schedulingMode]:
+      args["scheduling-mode"] !== undefined
+        ? selectProperty(args["scheduling-mode"])
+        : task.properties[TASK_FIELDS.schedulingMode]
+          ? undefined
+          : selectProperty("flexible_block"),
+    [TASK_FIELDS.scheduleType]: selectProperty(args["schedule-type"] || task.properties[TASK_FIELDS.scheduleType] || "soft"),
+    [TASK_FIELDS.status]: selectProperty("scheduled"),
+    [TASK_FIELDS.stage]: selectProperty(args.stage || defaultStageForTask({
+      ...task,
+      properties: {
+        ...task.properties,
+        [TASK_FIELDS.scheduledStart]: args.start,
+        [TASK_FIELDS.scheduledEnd]: args.end,
+        [TASK_FIELDS.needsCalendar]: true
+      }
+    }))
+  });
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "link-schedule",
+    page_id: task.id,
+    task: task.title,
+    start: args.start,
+    end: args.end,
+    calendar_event_id: args["event-id"]
+  }, null, 2));
+}
+
+export function cmdUnlinkSchedule(args) {
+  const task = matchTask(args);
+  const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+  updatePageProperties(task.id, {
+    [TASK_FIELDS.calendarEventId]: richTextProperty("")
+  });
+
+  console.log(JSON.stringify({
+    ok: true,
+    action: "unlink-schedule",
+    page_id: task.id,
+    task: task.title,
+    removed_link: Boolean(eventId),
+    previous_calendar_event_id: eventId || null
+  }, null, 2));
+}
+
+export function cmdVerifySchedule(args) {
+  const task = matchTask(args);
+  const taskStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
+  const taskEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
+  const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+
+  let event = null;
+  let lookup = null;
+  if (eventId) {
+    lookup = fetchCalendarEvent(eventId);
+    if (lookup.ok) event = lookup.event || null;
+  }
+
+  const calendarStart = event?.start?.dateTime || event?.start?.date || null;
+  const calendarEnd = event?.end?.dateTime || event?.end?.date || null;
+  const synced =
+    Boolean(eventId) &&
+    Boolean(taskStart) &&
+    Boolean(taskEnd) &&
+    Boolean(event) &&
+    event.status !== "cancelled" &&
+    normalizedInstant(taskStart) === normalizedInstant(calendarStart) &&
+    normalizedInstant(taskEnd) === normalizedInstant(calendarEnd);
+
+  emitJson({
+    ok: true,
+    action: "verify-schedule",
+    page_id: task.id,
+    task: task.title,
+    synced,
+    calendar_event_id: eventId || null,
+    task_schedule: {
+      start: taskStart,
+      end: taskEnd
+    },
+    calendar_schedule: {
+      start: calendarStart,
+      end: calendarEnd
+    },
+    calendar_status: event?.status || null,
+    lookup_ok: lookup ? lookup.ok === true : null,
+    not_found: lookup ? Boolean(lookup.notFound) : false
+  });
 }
 
 export function cmdSync(args = {}) {

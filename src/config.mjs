@@ -15,6 +15,9 @@ export const OPENCLAW_CONTAINER_ROOT =
 export const BOARD_PATH = process.env.BOARD_PATH || path.join(CWD, "board.json");
 export const HISTORY_ROOT = process.env.HISTORY_ROOT || path.join(CWD, "history");
 export const COMPLETIONS_ROOT = path.join(HISTORY_ROOT, "completions");
+export const DISABLE_BACKGROUND_SYNC = /^(1|true|yes)$/i.test(
+  String(process.env.NOTION_OPS_DISABLE_BACKGROUND_SYNC || "")
+);
 
 export const TASK_FIELDS = {
   title: "Task Name",
@@ -86,6 +89,18 @@ export const TASK_VIEW_SPECS = {
     filter: (row) =>
       row.properties[TASK_FIELDS.stage] === "blocked" &&
       row.properties[TASK_FIELDS.status] !== "done"
+  },
+  overdue: {
+    aliases: ["overdue"],
+    filter: (row) => {
+      const dueDate = row.properties[TASK_FIELDS.dueDate]?.start || row.properties[TASK_FIELDS.dueDate];
+      return (
+        Boolean(dueDate) &&
+        dueDate < new Date().toISOString().slice(0, 10) &&
+        row.properties[TASK_FIELDS.status] !== "done" &&
+        row.properties[TASK_FIELDS.stage] !== "archived"
+      );
+    }
   },
   needs_scheduling: {
     aliases: ["needs_scheduling"],

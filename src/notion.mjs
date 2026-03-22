@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   BOARD_PATH,
   CONTAINER,
+  DISABLE_BACKGROUND_SYNC,
   MIRROR_ROOT,
   MIRROR_SYNC,
   MIRROR_SYNC_MATCH,
@@ -16,8 +17,54 @@ import {
 import { die, extractPageTitle, loadJson, normalizePropertyValue, resolveRuntimePath, sleep } from "./util.mjs";
 
 const FAST_MIRROR_SYNC_SCRIPT = fileURLToPath(new URL("./fast-sync.mjs", import.meta.url));
-const FAST_MIRROR_SYNC_MATCH = `node ${FAST_MIRROR_SYNC_SCRIPT}`;
 const FULL_MIRROR_DEFAULT_WAIT_MS = 5000;
+
+function resolveCommandBin(name, envValue, absoluteCandidates = []) {
+  const candidates = [
+    envValue,
+    ...absoluteCandidates
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  try {
+    return execFileSync("sh", ["-lc", `command -v ${name}`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+const DOCKER_BIN = resolveCommandBin("docker", process.env.DOCKER_BIN, [
+  "/usr/bin/docker",
+  "/usr/local/bin/docker"
+]);
+
+function resolveNodeBin() {
+  const candidates = [
+    process.env.NODE_BIN,
+    process.execPath,
+    "/usr/bin/node",
+    "/usr/local/bin/node",
+    "node"
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (candidate === "node") return candidate;
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return "node";
+}
+
+const NODE_BIN = resolveNodeBin();
+const FAST_MIRROR_SYNC_MATCH = FAST_MIRROR_SYNC_SCRIPT;
+const NOTION_COMMAND = DOCKER_BIN
+  ? { bin: DOCKER_BIN, prefix: ["exec", CONTAINER, "node", NOTION_API] }
+  : { bin: NODE_BIN, prefix: [NOTION_API] };
+const FULL_SYNC_COMMAND = DOCKER_BIN
+  ? { bin: DOCKER_BIN, args: ["exec", CONTAINER, "node", MIRROR_SYNC, "--root", MIRROR_ROOT] }
+  : { bin: NODE_BIN, args: [MIRROR_SYNC, "--root", MIRROR_ROOT] };
 
 function normalizePage(page) {
   return {
@@ -35,7 +82,7 @@ function normalizePage(page) {
 }
 
 export function runNotion(args) {
-  return execFileSync("docker", ["exec", CONTAINER, "node", NOTION_API, ...args], {
+  return execFileSync(NOTION_COMMAND.bin, [...NOTION_COMMAND.prefix, ...args], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -54,8 +101,9 @@ function hostProcessRunning(match) {
 }
 
 function containerProcessRunning(match) {
+  if (!DOCKER_BIN) return hostProcessRunning(match);
   try {
-    const output = execFileSync("docker", ["exec", CONTAINER, "pgrep", "-af", match], {
+    const output = execFileSync(DOCKER_BIN, ["exec", CONTAINER, "pgrep", "-af", match], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
@@ -163,7 +211,7 @@ function startFullMirrorSync() {
   fs.mkdirSync(host_root, { recursive: true });
   const logFd = fs.openSync(log_path, "a");
   fs.writeSync(logFd, `[${new Date().toISOString()}] starting full mirror sync\n`);
-  const child = spawn("docker", ["exec", CONTAINER, "node", MIRROR_SYNC, "--root", MIRROR_ROOT], {
+  const child = spawn(FULL_SYNC_COMMAND.bin, FULL_SYNC_COMMAND.args, {
     detached: true,
     stdio: ["ignore", logFd, logFd]
   });
@@ -213,9 +261,10 @@ export function runMirrorSync({ full = false, waitMs } = {}) {
 }
 
 export function kickMirrorSync() {
+  if (DISABLE_BACKGROUND_SYNC) return;
   if (fastMirrorSyncRunning()) return;
   try {
-    const child = spawn("node", [FAST_MIRROR_SYNC_SCRIPT], {
+    const child = spawn(NODE_BIN, [FAST_MIRROR_SYNC_SCRIPT], {
       detached: true,
       stdio: "ignore"
     });
