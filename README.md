@@ -15,11 +15,14 @@ For your current machine, the intended model is:
 - reads tasks, projects, and goals from a local Notion mirror
 - writes through a Notion API CLI running inside an OpenClaw container
 - triggers a background mirror refresh after writes
+- avoids stacking duplicate mirror-sync workers when a sync is already running
 - keeps a local append-only completion history for archived tasks
+- uses a fast board-only sync path by default for task/project/goal mirrors
 - provides higher-level maintenance commands like:
   - `close-day`
   - `show-completed`
   - `triage-inbox`
+  - `scheduling-decisions`
   - `reconcile-calendar`
 
 ## Requirements
@@ -93,6 +96,7 @@ node notion-board-ops.mjs
 Core commands:
 
 - `capture --title "..." [--project "..."] [--goal "..."] [--due-date YYYY-MM-DD]`
+  - if `--start` and `--end` are supplied, the wrapper now creates the matching Google Calendar event and stores the event ID alongside the Notion schedule fields
 - `plan-day [--date today|YYYY-MM-DD] [--limit N] [--start-hour H] [--end-hour H]`
 - `plan-week [--date today|YYYY-MM-DD] [--promote-limit N] [--capacity-minutes N]`
 - `show --view today|week|month|year|inbox|blocked|needs_scheduling|execution|calendar`
@@ -104,11 +108,14 @@ Core commands:
 - `block-task --match "..." | --page-id <PAGE_ID> --reason "..."`
 - `complete-task --match "..." | --page-id <PAGE_ID> [--when YYYY-MM-DD] [--archive false]`
 - `set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO`
+- `remove-schedule --match "..." | --page-id <PAGE_ID>`
+- `reschedule-task --match "..." | --page-id <PAGE_ID> --start ISO --end ISO`
+  - schedule-writing commands reject partial or inverted time ranges instead of writing broken state
 - `list-projects`
 - `list-goals`
 - `project-review [--match "..."] | [--page-id <PAGE_ID>]`
 - `goal-review [--match "..."] | [--page-id <PAGE_ID>]`
-- `sync`
+- `sync [--full]`
 
 Maintenance commands:
 
@@ -116,7 +123,14 @@ Maintenance commands:
 - `close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]`
 - `triage-inbox [--date YYYY-MM-DD] [--limit N] [--apply]`
 - `review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]`
+- `scheduling-decisions [--date today|tomorrow|YYYY-MM-DD] [--days N] [--limit N]`
 - `reconcile-calendar [--apply-clear-stale]`
+
+Board model notes:
+
+- `today` and `this week` can be real child pages
+- `this month` and `this year` can be view-backed surfaces rather than standalone pages
+- the CLI operates on the task/project/goal data sources and mirror files, so it does not depend on decorative dashboard prose or checklist blocks
 
 ## Completion history
 
@@ -130,7 +144,9 @@ This lets active tasks disappear from Notion views while still preserving a dura
 
 ## Notes
 
-- `reconcile-calendar` currently validates Notion-side calendar state only. It does not inspect Google Calendar directly.
+- `sync` is optimized for the configured board databases; use `sync --full` only when you explicitly need the slower whole-workspace mirror.
+- `scheduling-decisions` separates unresolved hard-time items from flexible items that should be surfaced conversationally before scheduling.
+- `reconcile-calendar` validates Notion-side state and also checks referenced Google Calendar events directly through `gog`.
 - The CLI assumes your board uses task properties similar to:
   - `Task Name`
   - `Stage`

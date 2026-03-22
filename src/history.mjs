@@ -1,8 +1,22 @@
-import { COMPLETIONS_ROOT, TASK_FIELDS } from "./config.mjs";
-import { appendJsonLine, normalizeDateArg, readJsonLines } from "./util.mjs";
+import {
+  COMPLETIONS_ROOT,
+  OPENCLAW_CONTAINER_ROOT,
+  OPENCLAW_HOST_ROOT,
+  TASK_FIELDS
+} from "./config.mjs";
+import {
+  appendJsonLine,
+  normalizeDateArg,
+  readJsonLines,
+  resolveRuntimePath
+} from "./util.mjs";
 
 export function completionLogPath(date) {
-  return `${COMPLETIONS_ROOT}/${date}.jsonl`;
+  const filePath = `${COMPLETIONS_ROOT}/${date}.jsonl`;
+  return resolveRuntimePath(filePath, [
+    translateOpenClawPath(filePath, OPENCLAW_CONTAINER_ROOT, OPENCLAW_HOST_ROOT),
+    translateOpenClawPath(filePath, OPENCLAW_HOST_ROOT, OPENCLAW_CONTAINER_ROOT)
+  ]);
 }
 
 export function dateStart(value) {
@@ -45,4 +59,10 @@ export function logCompletion(task, meta = {}) {
 
 export function readCompletions(date) {
   return readJsonLines(completionLogPath(normalizeDateArg(date)));
+}
+
+function translateOpenClawPath(filePath, fromRoot, toRoot) {
+  if (!filePath || !fromRoot || !toRoot) return null;
+  if (!filePath.startsWith(fromRoot)) return null;
+  return `${toRoot}${filePath.slice(fromRoot.length)}`;
 }

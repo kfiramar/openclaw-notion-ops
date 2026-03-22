@@ -3,10 +3,15 @@ import path from "node:path";
 const CWD = process.cwd();
 
 export const CONTAINER = process.env.OPENCLAW_CONTAINER || "openclaw-openclaw-1";
+export const PRIMARY_CALENDAR_ID = process.env.PRIMARY_CALENDAR_ID || "suukpehoy@gmail.com";
 export const NOTION_API = process.env.NOTION_API_PATH || "/data/.openclaw/skills/notion-api/scripts/notion-api.mjs";
 export const MIRROR_ROOT = process.env.NOTION_MIRROR_ROOT || "/data/.openclaw/notion-mirror";
 export const MIRROR_SYNC = process.env.NOTION_MIRROR_SYNC || "/data/.openclaw/skills/notion-local-mirror/scripts/notion-sync.mjs";
 export const MIRROR_SYNC_MATCH = `node ${MIRROR_SYNC} --root ${MIRROR_ROOT}`;
+export const OPENCLAW_HOST_ROOT =
+  process.env.OPENCLAW_HOST_ROOT || "/docker/openclaw-pma3/data/.openclaw";
+export const OPENCLAW_CONTAINER_ROOT =
+  process.env.OPENCLAW_CONTAINER_ROOT || "/data/.openclaw";
 export const BOARD_PATH = process.env.BOARD_PATH || path.join(CWD, "board.json");
 export const HISTORY_ROOT = process.env.HISTORY_ROOT || path.join(CWD, "history");
 export const COMPLETIONS_ROOT = path.join(HISTORY_ROOT, "completions");
@@ -17,12 +22,18 @@ export const TASK_FIELDS = {
   status: "Status",
   horizon: "Horizon",
   type: "Type",
+  repeatMode: "Repeat Mode",
   priority: "Priority",
   needsCalendar: "Needs Calendar",
+  schedulingMode: "Scheduling Mode",
   scheduleType: "Schedule Type",
   estimatedMinutes: "Estimated Minutes",
   energy: "Energy",
   cadence: "Cadence",
+  repeatWindow: "Repeat Window",
+  repeatTargetCount: "Repeat Target Count",
+  repeatProgress: "Repeat Progress",
+  repeatDays: "Repeat Days",
   dueDate: "Due Date",
   nextDueAt: "Next Due At",
   reviewNotes: "Review Notes",
@@ -80,6 +91,9 @@ export const TASK_VIEW_SPECS = {
     aliases: ["needs_scheduling"],
     filter: (row) =>
       row.properties[TASK_FIELDS.needsCalendar] === true &&
+      !row.properties[TASK_FIELDS.calendarEventId] &&
+      !row.properties[TASK_FIELDS.scheduledStart]?.start &&
+      !row.properties[TASK_FIELDS.scheduledEnd]?.start &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
   },

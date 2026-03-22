@@ -1,6 +1,13 @@
-import { BOARD_PATH, TASK_FIELDS, TASK_VIEW_ALIASES, TASK_VIEW_SPECS } from "./config.mjs";
+import {
+  BOARD_PATH,
+  OPENCLAW_CONTAINER_ROOT,
+  OPENCLAW_HOST_ROOT,
+  TASK_FIELDS,
+  TASK_VIEW_ALIASES,
+  TASK_VIEW_SPECS
+} from "./config.mjs";
 import { dateStart } from "./history.mjs";
-import { getPage } from "./notion.mjs";
+import { getPage, queryDataSourceRows } from "./notion.mjs";
 import {
   addDays,
   checkboxProperty,
@@ -11,6 +18,7 @@ import {
   normalize,
   nowDate,
   numberProperty,
+  resolveRuntimePath,
   richTextProperty,
   selectProperty
 } from "./util.mjs";
@@ -23,14 +31,22 @@ const HORIZON_ORDER = {
 };
 
 export function board() {
-  return loadJson(BOARD_PATH);
+  return loadJson(resolveBoardPath(BOARD_PATH));
 }
 
 export function mirrorRows(kind) {
   const b = board();
+  const dataSourceId = b.databases[kind]?.data_source_id;
   const file = b.databases[kind]?.mirror_file;
-  if (!file) die(`missing mirror file for ${kind}`);
-  return loadJson(file).rows || [];
+  if (file) {
+    try {
+      return loadJson(resolveBoardPath(file)).rows || [];
+    } catch {
+      // Fall back to live Notion when the mirror is missing or unreadable.
+    }
+  }
+  if (dataSourceId) return queryDataSourceRows(dataSourceId);
+  die(`missing mirror file for ${kind}`);
 }
 
 export function plusCadence(base, cadence) {
@@ -49,6 +65,30 @@ export function defaultHorizonForCadence(cadence) {
   return null;
 }
 
+export function inferRepeatModeFromShape({ repeatMode = null, type = null, cadence = null }) {
+  if (repeatMode) return repeatMode;
+  if (type === "goal_generated") return "goal_derived";
+  if (cadence && cadence !== "none") return "cadence";
+  if (type === "recurring") return "manual_repeat";
+  return "none";
+}
+
+export function inferTypeFromShape({ type = null, repeatMode = null, cadence = null }) {
+  if (type) return type;
+  const resolvedRepeatMode = inferRepeatModeFromShape({ repeatMode, type, cadence });
+  if (resolvedRepeatMode === "goal_derived") return "goal_generated";
+  if (resolvedRepeatMode === "cadence" || resolvedRepeatMode === "manual_repeat") return "recurring";
+  return "one_time";
+}
+
+export function repeatModeOf(task) {
+  return inferRepeatModeFromShape({
+    repeatMode: task.properties[TASK_FIELDS.repeatMode],
+    type: task.properties[TASK_FIELDS.type],
+    cadence: task.properties[TASK_FIELDS.cadence]
+  });
+}
+
 export function summary(row) {
   return {
     id: row.id,
@@ -56,10 +96,17 @@ export function summary(row) {
     stage: row.properties[TASK_FIELDS.stage],
     status: row.properties[TASK_FIELDS.status],
     horizon: row.properties[TASK_FIELDS.horizon],
+    type: row.properties[TASK_FIELDS.type],
+    repeat_mode: repeatModeOf(row),
+    cadence: row.properties[TASK_FIELDS.cadence],
+    repeat_window: row.properties[TASK_FIELDS.repeatWindow],
+    repeat_target_count: row.properties[TASK_FIELDS.repeatTargetCount],
+    repeat_progress: row.properties[TASK_FIELDS.repeatProgress],
+    repeat_days: row.properties[TASK_FIELDS.repeatDays] || [],
+    scheduling_mode: row.properties[TASK_FIELDS.schedulingMode] || null,
     due_date: dateStart(row.properties[TASK_FIELDS.dueDate]),
     scheduled_start: dateStart(row.properties[TASK_FIELDS.scheduledStart]),
-    needs_calendar: row.properties[TASK_FIELDS.needsCalendar],
-    type: row.properties[TASK_FIELDS.type]
+    needs_calendar: row.properties[TASK_FIELDS.needsCalendar]
   };
 }
 
@@ -133,7 +180,7 @@ export function clearCalendarProperties() {
 export function inferHorizon(task, baseDate = nowDate()) {
   const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
   const cadence = task.properties[TASK_FIELDS.cadence];
-  const type = task.properties[TASK_FIELDS.type];
+  const repeatMode = repeatModeOf(task);
 
   if (dueDate) {
     if (dueDate <= baseDate) return "today";
@@ -142,12 +189,19 @@ export function inferHorizon(task, baseDate = nowDate()) {
     return "this year";
   }
 
-  if (cadence) return defaultHorizonForCadence(cadence) || "this week";
-  if (type === "goal_generated") return "this year";
+  if (repeatMode === "cadence" && cadence) return defaultHorizonForCadence(cadence) || "this week";
+  if (repeatMode === "goal_derived") return "this year";
   return "this week";
 }
 
 export function inferNeedsCalendar(task) {
+  const schedulingMode = task.properties[TASK_FIELDS.schedulingMode];
+  if (schedulingMode === "hard_time" || schedulingMode === "flexible_block" || schedulingMode === "routine_window") {
+    return true;
+  }
+  if (schedulingMode === "list_only") {
+    return false;
+  }
   if (task.properties[TASK_FIELDS.needsCalendar] === true) return true;
   const estimated = task.properties[TASK_FIELDS.estimatedMinutes];
   const priority = task.properties[TASK_FIELDS.priority];
@@ -218,4 +272,17 @@ export function triageProperties(proposal) {
     [TASK_FIELDS.needsCalendar]:
       proposal.suggested_needs_calendar === true ? checkboxProperty(true) : undefined
   };
+}
+
+function translateOpenClawPath(filePath, fromRoot, toRoot) {
+  if (!filePath || !fromRoot || !toRoot) return null;
+  if (!filePath.startsWith(fromRoot)) return null;
+  return `${toRoot}${filePath.slice(fromRoot.length)}`;
+}
+
+function resolveBoardPath(filePath) {
+  return resolveRuntimePath(filePath, [
+    translateOpenClawPath(filePath, OPENCLAW_CONTAINER_ROOT, OPENCLAW_HOST_ROOT),
+    translateOpenClawPath(filePath, OPENCLAW_HOST_ROOT, OPENCLAW_CONTAINER_ROOT)
+  ]);
 }

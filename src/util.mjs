@@ -28,6 +28,21 @@ export function readJsonLines(file) {
     .map((line) => JSON.parse(line));
 }
 
+export function resolveRuntimePath(filePath, candidates = []) {
+  const seen = new Set();
+  const ordered = [filePath, ...candidates].filter(Boolean).filter((value) => {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+
+  for (const candidate of ordered) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  return ordered[ordered.length - 1] || filePath;
+}
+
 export function parseArgs(argv) {
   const args = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
@@ -146,12 +161,20 @@ export function relationProperty(ids) {
   };
 }
 
+export function multiSelectProperty(values) {
+  return {
+    multi_select: (values || []).map((value) => ({ name: value }))
+  };
+}
+
 export function nowDate() {
   return new Date().toISOString().slice(0, 10);
 }
 
 export function normalizeDateArg(value) {
   if (!value || value === "today") return nowDate();
+  if (value === "tomorrow") return addDays(nowDate(), 1);
+  if (value === "yesterday") return addDays(nowDate(), -1);
   return value;
 }
 

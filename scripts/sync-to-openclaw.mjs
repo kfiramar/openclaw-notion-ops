@@ -27,6 +27,8 @@ const targetEntrypoint = path.join(workspaceRoot, "lifestyle-ops.mjs");
 const targetConfig = path.join(targetLib, "config.mjs");
 const targetBoardInContainer = path.posix.join(workspaceRootInContainer, "LIFESTYLE_BOARD.json");
 const targetHistoryInContainer = path.posix.join(workspaceRootInContainer, "history");
+const openclawHostRoot = path.dirname(workspaceRoot);
+const openclawContainerRoot = path.posix.dirname(workspaceRootInContainer);
 
 const checkOnly = process.argv.includes("--check");
 
@@ -57,6 +59,8 @@ export const NOTION_API = ${JSON.stringify(notionApiPath)};
 export const MIRROR_ROOT = ${JSON.stringify(mirrorRoot)};
 export const MIRROR_SYNC = ${JSON.stringify(mirrorSyncPath)};
 export const MIRROR_SYNC_MATCH = \`node \${MIRROR_SYNC} --root \${MIRROR_ROOT}\`;
+export const OPENCLAW_HOST_ROOT = ${JSON.stringify(openclawHostRoot)};
+export const OPENCLAW_CONTAINER_ROOT = ${JSON.stringify(openclawContainerRoot)};
 export const BOARD_PATH = ${JSON.stringify(targetBoardInContainer)};
 export const HISTORY_ROOT = ${JSON.stringify(targetHistoryInContainer)};
 export const COMPLETIONS_ROOT = \`\${HISTORY_ROOT}/completions\`;

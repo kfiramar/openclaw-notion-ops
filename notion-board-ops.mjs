@@ -11,17 +11,22 @@ import {
   cmdListProjects,
   cmdMoveTask,
   cmdPromote,
+  cmdRemoveSchedule,
+  cmdRescheduleTask,
   cmdSetSchedule,
   cmdShow,
   cmdSync
 } from "./src/commands.mjs";
 import {
   cmdCloseDay,
+  cmdRefreshManualRepeat,
   cmdGoalReview,
   cmdPlanDay,
   cmdPlanWeek,
   cmdProjectReview,
   cmdReconcileCalendar,
+  cmdScheduleSweep,
+  cmdSchedulingDecisions,
   cmdReviewStale,
   cmdShowCompleted,
   cmdTriageInbox
@@ -38,7 +43,7 @@ const COMMANDS = {
     run: cmdShowCompleted
   },
   capture: {
-    help: 'capture --title "..." [--project "..."] [--goal "..."] [--due-date YYYY-MM-DD] [--estimated-minutes N]',
+    help: 'capture --title "..." [--project "..."] [--goal "..."] [--horizon today|this week|this month|this year] [--due-date YYYY-MM-DD] [--start ISO --end ISO] [--cadence daily|weekly|monthly] [--repeat-mode none|cadence|manual_repeat|goal_derived] [--repeat-window week|month|year] [--repeat-target-count N] [--repeat-days "Sunday,Monday,..."] [--needs-calendar true|false] [--scheduling-mode hard_time|flexible_block|routine_window|list_only] [--schedule-type hard|soft] [--estimated-minutes N]',
     run: cmdCapture
   },
   "plan-day": {
@@ -53,13 +58,25 @@ const COMMANDS = {
     help: "close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]",
     run: cmdCloseDay
   },
+  "refresh-manual-repeat": {
+    help: "refresh-manual-repeat [--date today|YYYY-MM-DD] [--apply]",
+    run: cmdRefreshManualRepeat
+  },
   "triage-inbox": {
     help: "triage-inbox [--date YYYY-MM-DD] [--limit N] [--apply]",
     run: cmdTriageInbox
   },
   "reconcile-calendar": {
-    help: "reconcile-calendar [--apply-clear-stale]",
+    help: "reconcile-calendar [--apply-clear-stale] [--apply-link-matches]",
     run: cmdReconcileCalendar
+  },
+  "schedule-sweep": {
+    help: "schedule-sweep [--date today|YYYY-MM-DD] [--days N] [--limit N] [--max-daily-minutes N] [--apply]",
+    run: cmdScheduleSweep
+  },
+  "scheduling-decisions": {
+    help: "scheduling-decisions [--date today|tomorrow|YYYY-MM-DD] [--days N] [--limit N]",
+    run: cmdSchedulingDecisions
   },
   "review-stale": {
     help: "review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]",
@@ -78,11 +95,11 @@ const COMMANDS = {
     run: cmdInspectTask
   },
   "add-task": {
-    help: 'add-task --title "..." [--horizon today|this week|this month|this year] [--project "..."] [--project-id <ID>] [--goal "..."] [--goal-id <ID>]',
+    help: 'add-task --title "..." [--horizon today|this week|this month|this year] [--project "..."] [--project-id <ID>] [--goal "..."] [--goal-id <ID>] [--cadence daily|weekly|monthly] [--repeat-mode none|cadence|manual_repeat|goal_derived] [--repeat-window week|month|year] [--repeat-target-count N] [--repeat-days "Sunday,Monday,..."] [--needs-calendar true|false] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
     run: cmdAddTask
   },
   "move-task": {
-    help: 'move-task --match "..." | --page-id <PAGE_ID> [--horizon ...] [--stage ...] [--due-date YYYY-MM-DD]',
+    help: 'move-task --match "..." | --page-id <PAGE_ID> [--horizon ...] [--stage ...] [--due-date YYYY-MM-DD] [--scheduled-start ISO] [--scheduled-end ISO] [--needs-calendar true|false] [--scheduling-mode ...] [--schedule-type hard|soft]',
     run: cmdMoveTask
   },
   promote: {
@@ -102,8 +119,16 @@ const COMMANDS = {
     run: cmdCompleteTask
   },
   "set-schedule": {
-    help: 'set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO [--schedule-type hard|soft]',
+    help: 'set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
     run: cmdSetSchedule
+  },
+  "remove-schedule": {
+    help: 'remove-schedule --match "..." | --page-id <PAGE_ID> [--status todo] [--stage planned|active|blocked|inbox]',
+    run: cmdRemoveSchedule
+  },
+  "reschedule-task": {
+    help: 'reschedule-task --match "..." | --page-id <PAGE_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
+    run: cmdRescheduleTask
   },
   "list-projects": {
     help: "list-projects",
@@ -114,7 +139,7 @@ const COMMANDS = {
     run: cmdListGoals
   },
   sync: {
-    help: "sync",
+    help: "sync [--full]",
     run: cmdSync
   }
 };
