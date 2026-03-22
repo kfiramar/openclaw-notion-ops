@@ -1,7 +1,7 @@
 import { TASK_FIELDS } from "./config.mjs";
 import { createCalendarEvent, deleteCalendarEvent, fetchCalendarEvent, fetchCalendarEventsInRange } from "./calendar.mjs";
 import { dateStart, logCompletion, readCompletions } from "./history.mjs";
-import { archivePage, updatePageProperties } from "./notion.mjs";
+import { archivePage, getPage, updatePageProperties } from "./notion.mjs";
 import {
   carryForwardProperties,
   clearCalendarProperties,
@@ -282,9 +282,7 @@ function countBy(items, keyFn) {
 
 function resolveRows(rows, args, label) {
   if (args["page-id"]) {
-    const row = rows.find((item) => item.id === args["page-id"]);
-    if (!row) throw new Error(`no ${label} matched page id ${args["page-id"]}`);
-    return [row];
+    return [getPage(args["page-id"])];
   }
   if (args.match) return [selectRow(rows, args.match, label)];
   return rows;
@@ -750,7 +748,8 @@ export function cmdReviewStale(args) {
     const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
     const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
     const scheduledEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
-    const lastEditedDaysAgo = task.last_edited_time ? diffDays(`${date}T00:00:00Z`, task.last_edited_time) : null;
+    const lastEditedDate = task.last_edited_time ? String(task.last_edited_time).slice(0, 10) : null;
+    const lastEditedDaysAgo = lastEditedDate ? diffDays(`${date}T00:00:00Z`, `${lastEditedDate}T00:00:00Z`) : null;
     const missingProjectIds = base.project_ids.filter((id) => !validProjectIds.has(id));
     const missingGoalIds = base.goal_ids.filter((id) => !validGoalIds.has(id));
 

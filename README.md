@@ -63,6 +63,11 @@ Use the repo as the source of truth, then regenerate the live wrapper:
 npm run sync:openclaw
 ```
 
+This deploys both:
+
+- the live workspace wrapper under `/data/.openclaw/workspace-personal`
+- the managed full-mirror skill script at `notion-local-mirror/scripts/notion-sync.mjs`
+
 Check whether the live workspace has drifted:
 
 ```bash
@@ -86,6 +91,33 @@ You can override it:
 ```bash
 OPENCLAW_WORKSPACE=/some/other/workspace npm run sync:openclaw
 ```
+
+If the managed mirror skill lives at a non-default host path, override it:
+
+```bash
+NOTION_MIRROR_SYNC_HOST=/abs/path/to/notion-sync.mjs npm run sync:openclaw
+```
+
+## Full Mirror Script
+
+The optimized whole-workspace Notion mirror is now tracked here:
+
+```text
+scripts/notion-local-mirror-sync.mjs
+```
+
+It is the repo copy of the runtime script used by OpenClaw's `sync --full` path.
+
+Useful direct invocation:
+
+```bash
+node scripts/notion-local-mirror-sync.mjs --root /data/.openclaw/notion-mirror
+```
+
+Tuning:
+
+- `--concurrency N` or `NOTION_MIRROR_CONCURRENCY`
+- `--max-data-source-rows N`
 
 ## Commands
 

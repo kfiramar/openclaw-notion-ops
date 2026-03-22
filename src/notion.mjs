@@ -17,6 +17,7 @@ import { die, extractPageTitle, loadJson, normalizePropertyValue, resolveRuntime
 
 const FAST_MIRROR_SYNC_SCRIPT = fileURLToPath(new URL("./fast-sync.mjs", import.meta.url));
 const FAST_MIRROR_SYNC_MATCH = `node ${FAST_MIRROR_SYNC_SCRIPT}`;
+const FULL_MIRROR_DEFAULT_WAIT_MS = 5000;
 
 function normalizePage(page) {
   return {
@@ -80,10 +81,11 @@ export function waitForMirrorSync(timeoutMs = 30000, { full = false } = {}) {
   const started = Date.now();
   while (mirrorSyncRunning({ full })) {
     if (Date.now() - started > timeoutMs) {
-      die(`mirror sync still running after ${timeoutMs}ms`);
+      return { completed: false, waited_ms: Date.now() - started };
     }
     sleep(250);
   }
+  return { completed: true, waited_ms: Date.now() - started };
 }
 
 function translateOpenClawPath(filePath, fromRoot, toRoot) {
@@ -140,19 +142,74 @@ export function runBoardMirrorSync() {
   }
 }
 
-export function runMirrorSync({ full = false } = {}) {
+function fullMirrorPaths() {
+  const hostRoot = resolveBoardPath(MIRROR_ROOT);
+  return {
+    host_root: hostRoot,
+    log_path: path.join(hostRoot, "full-sync.log")
+  };
+}
+
+function currentFullMirrorStatus() {
+  const paths = fullMirrorPaths();
+  return {
+    ...paths,
+    log_path: fs.existsSync(paths.log_path) ? paths.log_path : null
+  };
+}
+
+function startFullMirrorSync() {
+  const { host_root, log_path } = fullMirrorPaths();
+  fs.mkdirSync(host_root, { recursive: true });
+  const logFd = fs.openSync(log_path, "a");
+  fs.writeSync(logFd, `[${new Date().toISOString()}] starting full mirror sync\n`);
+  const child = spawn("docker", ["exec", CONTAINER, "node", MIRROR_SYNC, "--root", MIRROR_ROOT], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd]
+  });
+  child.unref();
+  fs.closeSync(logFd);
+  return {
+    pid: child.pid,
+    ...fullMirrorPaths()
+  };
+}
+
+export function runMirrorSync({ full = false, waitMs } = {}) {
   if (mirrorSyncRunning({ full })) {
-    waitForMirrorSync(full ? 30000 : 15000, { full });
-    return;
+    const timeoutMs = full ? Number(waitMs ?? FULL_MIRROR_DEFAULT_WAIT_MS) : 15000;
+    const result = waitForMirrorSync(timeoutMs, { full });
+    if (!full && !result.completed) {
+      die(`mirror sync still running after ${timeoutMs}ms`);
+    }
+    return full
+      ? {
+          ok: true,
+          mode: "full-workspace",
+          state: result.completed ? "completed-existing" : "running-existing",
+          ...currentFullMirrorStatus(),
+          ...result
+        }
+      : {
+          ok: true,
+          mode: "fast-board",
+          state: "completed-existing",
+          ...result
+        };
   }
   if (!full) {
     runBoardMirrorSync();
-    return;
+    return { ok: true, mode: "fast-board", state: "completed" };
   }
-  execFileSync("docker", ["exec", CONTAINER, "node", MIRROR_SYNC, "--root", MIRROR_ROOT], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+  const launched = startFullMirrorSync();
+  const result = waitForMirrorSync(Number(waitMs ?? FULL_MIRROR_DEFAULT_WAIT_MS), { full: true });
+  return {
+    ok: true,
+    mode: "full-workspace",
+    state: result.completed ? "completed" : "started-background",
+    ...launched,
+    ...result
+  };
 }
 
 export function kickMirrorSync() {

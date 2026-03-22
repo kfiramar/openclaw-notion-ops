@@ -134,6 +134,7 @@ export function cmdCapture(args) {
   const title = args.title || args._.join(" ");
   if (!title) throw new Error('usage: capture --title "..." [--project "..."] [--goal "..."]');
   assertScheduleRange("capture", args.start, args.end);
+  const baseDate = normalizeDateArg(args.date);
 
   const repeatMode = inferRepeatModeFromShape({
     repeatMode: args["repeat-mode"],
@@ -146,7 +147,14 @@ export function cmdCapture(args) {
     repeatMode,
     cadence: args.cadence || null
   });
-  const dueDate = isoDate(args["due-date"] || null);
+  const implicitDueDate = repeatAnchorDate({
+    repeatMode,
+    cadence: args.cadence || null,
+    repeatWindow: args["repeat-window"] || null,
+    baseDate
+  });
+  const dueDate = isoDate(args["due-date"] || implicitDueDate || null);
+  const nextDueAt = isoDate(args["next-due-at"] || dueDate || null);
   const projectIds = resolveRelationArg("projects", args, "project", "project-id");
   const goalIds = resolveRelationArg("goals", args, "goal", "goal-id");
   const explicitNeedsCalendar = boolOrNull(args["needs-calendar"]);
@@ -233,7 +241,7 @@ export function cmdCapture(args) {
       [TASK_FIELDS.repeatProgress]: numberProperty(args["repeat-progress"]),
       [TASK_FIELDS.repeatDays]: multiSelectProperty(repeatDays),
       [TASK_FIELDS.dueDate]: dateProperty(dueDate),
-      [TASK_FIELDS.nextDueAt]: dateProperty(isoDate(args["next-due-at"] || null)),
+      [TASK_FIELDS.nextDueAt]: dateProperty(nextDueAt),
       [TASK_FIELDS.reviewNotes]: richTextProperty(args.notes || ""),
       [TASK_FIELDS.project]: relationProperty(projectIds),
       [TASK_FIELDS.goal]: relationProperty(goalIds),
@@ -654,8 +662,9 @@ export function cmdRescheduleTask(args) {
 
 export function cmdSync(args = {}) {
   const full = args.full === true;
-  runMirrorSync({ full });
-  console.log(JSON.stringify({ ok: true, action: "sync", mode: full ? "full-workspace" : "fast-board" }, null, 2));
+  const waitMs = args["wait-ms"] === undefined ? undefined : Number(args["wait-ms"]);
+  const result = runMirrorSync({ full, waitMs });
+  console.log(JSON.stringify({ ok: true, action: "sync", ...result }, null, 2));
 }
 
 export function cmdListProjects() {

@@ -2,7 +2,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,8 +19,10 @@ const mirrorRoot = process.env.NOTION_MIRROR_ROOT || "/data/.openclaw/notion-mir
 const mirrorSyncPath =
   process.env.NOTION_MIRROR_SYNC ||
   "/data/.openclaw/skills/notion-local-mirror/scripts/notion-sync.mjs";
+const mirrorSyncHostPath = process.env.NOTION_MIRROR_SYNC_HOST || null;
 
 const sourceLib = path.join(repoRoot, "src");
+const sourceMirrorSync = path.join(repoRoot, "scripts", "notion-local-mirror-sync.mjs");
 const targetLib = path.join(workspaceRoot, "lifestyle-ops-lib");
 const sourceEntrypoint = path.join(repoRoot, "notion-board-ops.mjs");
 const targetEntrypoint = path.join(workspaceRoot, "lifestyle-ops.mjs");
@@ -32,28 +34,36 @@ const openclawContainerRoot = path.posix.dirname(workspaceRootInContainer);
 
 const checkOnly = process.argv.includes("--check");
 
-function ensureDir(dir) {
+export function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-function writeFileIfChanged(filePath, content) {
+export function writeFileIfChanged(filePath, content, { check = checkOnly } = {}) {
   const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : null;
   if (existing === content) {
     return false;
   }
-  if (!checkOnly) {
+  if (!check) {
     ensureDir(path.dirname(filePath));
     fs.writeFileSync(filePath, content);
   }
   return true;
 }
 
-function copyFileIfChanged(sourcePath, targetPath) {
+export function copyFileIfChanged(sourcePath, targetPath, options = {}) {
   const content = fs.readFileSync(sourcePath, "utf8");
-  return writeFileIfChanged(targetPath, content);
+  return writeFileIfChanged(targetPath, content, options);
 }
 
-function liveConfigText() {
+function translateContainerPathToHost(filePath) {
+  if (!filePath) return null;
+  if (filePath.startsWith(openclawContainerRoot)) {
+    return path.join(openclawHostRoot, filePath.slice(openclawContainerRoot.length));
+  }
+  return null;
+}
+
+export function liveConfigText() {
   return `export const CONTAINER = ${JSON.stringify(container)};
 export const NOTION_API = ${JSON.stringify(notionApiPath)};
 export const MIRROR_ROOT = ${JSON.stringify(mirrorRoot)};
@@ -163,44 +173,61 @@ export const TASK_VIEW_ALIASES = Object.fromEntries(
 `;
 }
 
-function liveEntrypointText() {
+export function liveEntrypointText() {
   const source = fs.readFileSync(sourceEntrypoint, "utf8");
   return source
     .replaceAll('./src/', './lifestyle-ops-lib/')
     .replace("notion-board-ops", "lifestyle-ops");
 }
 
-function sync() {
+export function syncOpenClaw({ check = checkOnly } = {}) {
   ensureDir(targetLib);
 
   const changed = [];
   for (const file of fs.readdirSync(sourceLib)) {
     if (!file.endsWith(".mjs") || file === "config.mjs") continue;
-    const didChange = copyFileIfChanged(path.join(sourceLib, file), path.join(targetLib, file));
+    const didChange = copyFileIfChanged(path.join(sourceLib, file), path.join(targetLib, file), { check });
     if (didChange) changed.push(path.join("lifestyle-ops-lib", file));
   }
 
-  if (writeFileIfChanged(targetConfig, liveConfigText())) {
+  if (writeFileIfChanged(targetConfig, liveConfigText(), { check })) {
     changed.push("lifestyle-ops-lib/config.mjs");
   }
 
-  if (writeFileIfChanged(targetEntrypoint, liveEntrypointText())) {
+  if (writeFileIfChanged(targetEntrypoint, liveEntrypointText(), { check })) {
     changed.push("lifestyle-ops.mjs");
   }
 
-  if (!checkOnly) {
+  const targetMirrorSync =
+    mirrorSyncHostPath ||
+    translateContainerPathToHost(mirrorSyncPath) ||
+    path.join(openclawHostRoot, "skills", "notion-local-mirror", "scripts", "notion-sync.mjs");
+  if (copyFileIfChanged(sourceMirrorSync, targetMirrorSync, { check })) {
+    changed.push(path.relative(openclawHostRoot, targetMirrorSync));
+  }
+
+  if (!check) {
     fs.chmodSync(targetEntrypoint, 0o755);
+    if (fs.existsSync(targetMirrorSync)) {
+      fs.chmodSync(targetMirrorSync, 0o755);
+    }
   }
 
   if (changed.length === 0) {
-    console.log(JSON.stringify({ ok: true, changed: false, files: [] }, null, 2));
-    return;
+    return { ok: true, changed: false, files: [] };
   }
 
-  console.log(JSON.stringify({ ok: true, changed: true, files: changed }, null, 2));
-  if (checkOnly) {
+  return { ok: true, changed: true, files: changed };
+}
+
+function isMain() {
+  return process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isMain()) {
+  const result = syncOpenClaw({ check: checkOnly });
+  console.log(JSON.stringify(result, null, 2));
+  if (checkOnly && result.changed) {
     process.exitCode = 1;
   }
 }
-
-sync();

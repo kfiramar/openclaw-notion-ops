@@ -139,7 +139,7 @@ const COMMANDS = {
     run: cmdListGoals
   },
   sync: {
-    help: "sync [--full]",
+    help: "sync [--full] [--wait-ms N]",
     run: cmdSync
   }
 };
