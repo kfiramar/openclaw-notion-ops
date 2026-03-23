@@ -208,6 +208,12 @@ This lets active tasks disappear from Notion views while still preserving a dura
 - `sync:dashboards` refreshes the root/daily/weekly page navigation from `LIFESTYLE_BOARD.json`, and also replaces the root menu's nested Today/This Week/This Month/This Year memo blocks with live task lists.
 - `sync:crons` pushes the repo-managed cron prompts/schedules into the live OpenClaw scheduler.
 - `smoke:cron -- --name "Daily overview with OpenClaw"` runs a named cron immediately and prints its latest persisted run history.
+- dedicated cron smoke commands are available for the main user-facing surfaces:
+  - `npm run smoke:morning`
+  - `npm run smoke:evening`
+  - `npm run smoke:weekly`
+  - `npm run smoke:monthly`
+  - `npm run smoke:yearly`
 - `sync:all` is the practical "make the live system match the repo" command for wrapper code, dashboard shells, and cron definitions.
 - The CLI assumes your board uses task properties similar to:
   - `Task Name`

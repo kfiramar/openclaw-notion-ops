@@ -96,6 +96,11 @@ Effect:
 Files:
 
 - `scripts/smoke-cron-job.mjs`
+- `scripts/smoke-morning-cron.mjs`
+- `scripts/smoke-evening-cron.mjs`
+- `scripts/smoke-weekly-cron.mjs`
+- `scripts/smoke-monthly-cron.mjs`
+- `scripts/smoke-yearly-cron.mjs`
 - `package.json`
 - `README.md`
 
@@ -107,6 +112,11 @@ Usage:
 
 ```bash
 npm run smoke:cron -- --name "Daily overview with OpenClaw"
+npm run smoke:morning
+npm run smoke:evening
+npm run smoke:weekly
+npm run smoke:monthly
+npm run smoke:yearly
 ```
 
 Effect:
