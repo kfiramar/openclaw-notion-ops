@@ -19,7 +19,7 @@ const JOBS = [
   },
   {
     name: "Lifestyle morning plan",
-    description: "Daily morning planning for the Lifestyle productivity system",
+    description: "Daily user-facing morning plan message for the Lifestyle productivity system",
     schedule: { kind: "cron", value: "15 7 * * *", tz: "Asia/Jerusalem" },
     delivery: { mode: "announce", channel: "telegram", to: TELEGRAM_TO, account: TELEGRAM_ACCOUNT },
     timeoutSeconds: 300,
@@ -29,7 +29,7 @@ const JOBS = [
   },
   {
     name: "Lifestyle scheduling sweep",
-    description: "Auto-place missing calendar blocks for safe lifestyle tasks",
+    description: "Daily silent hard-time scheduling pass for safe lifestyle tasks",
     schedule: { kind: "cron", value: "45 7 * * *", tz: "Asia/Jerusalem" },
     delivery: { mode: "none" },
     timeoutSeconds: 420,
@@ -40,7 +40,7 @@ const JOBS = [
   {
     name: "Daily overview with OpenClaw",
     description: "Daily evening overview to plan tomorrow for the Lifestyle productivity system",
-    schedule: { kind: "cron", value: "30 21 * * 0-5", tz: "Asia/Jerusalem" },
+    schedule: { kind: "cron", value: "30 21 * * *", tz: "Asia/Jerusalem" },
     delivery: { mode: "announce", channel: "telegram", to: TELEGRAM_TO, account: TELEGRAM_ACCOUNT },
     timeoutSeconds: 300,
     thinking: "medium",
@@ -49,7 +49,7 @@ const JOBS = [
   },
   {
     name: "Weekly overview with OpenClaw",
-    description: "Saturday weekly overview and next-week planning for the Lifestyle system",
+    description: "Saturday user-facing weekly overview and next-week planning for the Lifestyle system",
     schedule: { kind: "cron", value: "0 9 * * 6", tz: "Asia/Jerusalem" },
     delivery: { mode: "announce", channel: "telegram", to: TELEGRAM_TO, account: TELEGRAM_ACCOUNT },
     timeoutSeconds: 420,
@@ -59,7 +59,7 @@ const JOBS = [
   },
   {
     name: "Lifestyle weekly scheduling sweep",
-    description: "Weekly placement pass for missing blocks in the lifestyle system",
+    description: "Saturday silent weekly hard-time placement pass after the weekly overview",
     schedule: { kind: "cron", value: "20 9 * * 6", tz: "Asia/Jerusalem" },
     delivery: { mode: "none" },
     timeoutSeconds: 420,
