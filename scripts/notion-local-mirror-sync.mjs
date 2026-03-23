@@ -132,6 +132,41 @@ async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true });
 }
 
+function parseOwnerSpec(spec) {
+  if (!spec) return null;
+  const match = String(spec).trim().match(/^(\d+):(\d+)$/);
+  if (!match) {
+    throw new Error(`invalid owner spec ${JSON.stringify(spec)}; expected UID:GID`);
+  }
+  return {
+    uid: Number(match[1]),
+    gid: Number(match[2])
+  };
+}
+
+async function resolveDesiredOwnership(root, explicitOwner = null) {
+  if (explicitOwner) return explicitOwner;
+  const stats = await fs.stat(root);
+  if (typeof stats.uid !== "number" || typeof stats.gid !== "number") return null;
+  return {
+    uid: stats.uid,
+    gid: stats.gid
+  };
+}
+
+async function applyOwnershipRecursive(target, owner) {
+  if (!owner || typeof process.getuid !== "function" || process.getuid() !== 0) return;
+  const stats = await fs.lstat(target);
+  if (stats.uid !== owner.uid || stats.gid !== owner.gid) {
+    await fs.chown(target, owner.uid, owner.gid);
+  }
+  if (!stats.isDirectory()) return;
+  const entries = await fs.readdir(target, { withFileTypes: true });
+  for (const entry of entries) {
+    await applyOwnershipRecursive(path.join(target, entry.name), owner);
+  }
+}
+
 async function readToken() {
   if (!notionTokenPromise) {
     notionTokenPromise = (async () => {
@@ -297,15 +332,18 @@ async function cleanupStagingDirs(root, keep = 2) {
   }
 }
 
-async function atomicWrite(root, buildFn) {
+async function atomicWrite(root, buildFn, owner = null) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const staging = path.join(root, `.staging-${timestamp}`);
   const current = path.join(root, "current");
   await fs.rm(staging, { recursive: true, force: true });
   await ensureDir(staging);
+  await applyOwnershipRecursive(staging, owner);
   await buildFn(staging);
+  await applyOwnershipRecursive(staging, owner);
   await fs.rm(current, { recursive: true, force: true });
   await fs.rename(staging, current);
+  await applyOwnershipRecursive(current, owner);
   await cleanupStagingDirs(root);
 }
 
@@ -330,9 +368,11 @@ async function mapWithConcurrency(items, limit, mapper) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const root = path.resolve(args.root || "/data/.openclaw/notion-mirror");
+  const explicitOwner = parseOwnerSpec(args.owner || process.env.NOTION_MIRROR_OWNER || null);
   const maxDataSourceRows = Number(args["max-data-source-rows"] || 500);
   const concurrency = Math.max(1, Number(args.concurrency || DEFAULT_CONCURRENCY));
   await ensureDir(root);
+  const owner = await resolveDesiredOwnership(root, explicitOwner);
 
   const searchResults = await searchAll();
   const dataSources = searchResults.filter((item) => item.object === "data_source" && !item.in_trash && !item.archived);
@@ -482,9 +522,21 @@ async function main() {
 
     await fs.writeFile(path.join(staging, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     await fs.writeFile(path.join(staging, "overview.md"), `${overviewSections.join("\n")}\n`);
-  });
+  }, owner);
 
-  console.log(JSON.stringify({ ok: true, root, current: path.join(root, "current"), concurrency }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        root,
+        current: path.join(root, "current"),
+        concurrency,
+        owner: owner ? `${owner.uid}:${owner.gid}` : null
+      },
+      null,
+      2
+    )
+  );
 }
 
 main().catch((error) => {

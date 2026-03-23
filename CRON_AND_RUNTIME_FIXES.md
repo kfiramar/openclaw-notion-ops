@@ -167,10 +167,14 @@ Effect:
 What changed:
 
 - Fixed ownership for the live Notion mirror tree so the OpenClaw runtime user could write sync output.
+- Added an ownership-preserving safeguard to `scripts/notion-local-mirror-sync.mjs`.
+- The mirror sync now inherits the owner/group from the mirror root and reapplies that ownership to staging and final `current` trees.
+- The sync also supports an explicit owner override via `NOTION_MIRROR_OWNER=UID:GID` or `--owner UID:GID`.
 
 Effect:
 
 - Wrapper `sync` stopped failing from mirror write permission issues.
+- Host-side root-triggered mirror syncs no longer silently leave `current` as `root:root` when the mirror root itself belongs to the runtime user.
 
 ### 2. Doctor config normalization
 
