@@ -10,6 +10,10 @@
   "scripts": {
     "help": "node ./notion-board-ops.mjs",
     "sync:openclaw": "node ./scripts/sync-to-openclaw.mjs",
+    "sync:dashboards": "node ./scripts/sync-dashboards.mjs",
+    "sync:all": "npm run sync:openclaw && npm run sync:dashboards",
+    "check:dashboards": "node ./scripts/check-dashboards.mjs",
+    "audit:notion-ux": "node ./scripts/audit-notion-first-ux.mjs",
     "check:openclaw": "node ./scripts/sync-to-openclaw.mjs --check",
     "diff:openclaw": "bash ./scripts/diff-live.sh"
   },

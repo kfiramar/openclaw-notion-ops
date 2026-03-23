@@ -18,6 +18,8 @@ import {
   cmdRemoveSchedule,
   cmdRescheduleTask,
   cmdSetSchedule,
+  cmdSetMultiSchedule,
+  cmdSetSeriesSchedule,
   cmdShow,
   cmdSearchTasks,
   cmdSync,
@@ -27,6 +29,7 @@ import {
 } from "./src/commands.mjs";
 import {
   cmdCloseDay,
+  cmdEveningSummary,
   cmdRefreshManualRepeat,
   cmdGoalReview,
   cmdPlanDay,
@@ -49,6 +52,10 @@ const COMMANDS = {
   "show-completed": {
     help: "show-completed [--date today|YYYY-MM-DD]",
     run: cmdShowCompleted
+  },
+  "evening-summary": {
+    help: "evening-summary [--date today|YYYY-MM-DD] [--days N] [--task-limit N]",
+    run: cmdEveningSummary
   },
   capture: {
     help: 'capture --title "..." [--project "..."] [--goal "..."] [--horizon today|this week|this month|this year] [--due-date YYYY-MM-DD] [--start ISO --end ISO] [--cadence daily|weekly|monthly] [--repeat-mode none|cadence|manual_repeat|goal_derived] [--repeat-window week|month|year] [--repeat-target-count N] [--repeat-days "Sunday,Monday,..."] [--needs-calendar true|false] [--scheduling-mode hard_time|flexible_block|routine_window|list_only] [--schedule-type hard|soft] [--estimated-minutes N]',
@@ -145,6 +152,14 @@ const COMMANDS = {
   "set-schedule": {
     help: 'set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
     run: cmdSetSchedule
+  },
+  "set-series-schedule": {
+    help: 'set-series-schedule --match "..." | --page-id <PAGE_ID> --from-date YYYY-MM-DD --to-date YYYY-MM-DD --days "Monday,Tuesday" --start-time HH:MM --end-time HH:MM [--time-zone Asia/Jerusalem] [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
+    run: cmdSetSeriesSchedule
+  },
+  "set-multi-schedule": {
+    help: 'set-multi-schedule --match "..." | --page-id <PAGE_ID> --slots "START|END;START|END" [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
+    run: cmdSetMultiSchedule
   },
   "link-schedule": {
     help: 'link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',

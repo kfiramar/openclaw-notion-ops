@@ -20,6 +20,7 @@ For your current machine, the intended model is:
 - uses a fast board-only sync path by default for task/project/goal mirrors
 - provides higher-level maintenance commands like:
   - `close-day`
+  - `evening-summary`
   - `show-completed`
   - `triage-inbox`
   - `scheduling-decisions`
@@ -61,6 +62,18 @@ Use the repo as the source of truth, then regenerate the live wrapper:
 
 ```bash
 npm run sync:openclaw
+```
+
+Refresh the root, daily, and weekly Notion dashboard navigation blocks from the live board registry:
+
+```bash
+npm run sync:dashboards
+```
+
+Do both in one pass:
+
+```bash
+npm run sync:all
 ```
 
 This deploys both:
@@ -142,6 +155,7 @@ Core commands:
 - `block-task --match "..." | --page-id <PAGE_ID> --reason "..."`
 - `complete-task --match "..." | --page-id <PAGE_ID> [--when YYYY-MM-DD] [--archive false]`
 - `set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO`
+- `set-series-schedule --match "..." | --page-id <PAGE_ID> --from-date YYYY-MM-DD --to-date YYYY-MM-DD --days "Monday,Tuesday" --start-time HH:MM --end-time HH:MM`
 - `remove-schedule --match "..." | --page-id <PAGE_ID>`
 - `reschedule-task --match "..." | --page-id <PAGE_ID> --start ISO --end ISO`
   - schedule-writing commands reject partial or inverted time ranges instead of writing broken state
@@ -154,6 +168,7 @@ Core commands:
 Maintenance commands:
 
 - `show-completed [--date today|YYYY-MM-DD]`
+- `evening-summary [--date today|YYYY-MM-DD] [--days N] [--task-limit N]`
 - `close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]`
 - `triage-inbox [--date YYYY-MM-DD] [--limit N] [--apply]`
 - `review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]`
@@ -181,6 +196,10 @@ This lets active tasks disappear from Notion views while still preserving a dura
 - `sync` is optimized for the configured board databases; use `sync --full` only when you explicitly need the slower whole-workspace mirror.
 - `scheduling-decisions` separates unresolved hard-time items from flexible items that should be surfaced conversationally before scheduling.
 - `reconcile-calendar` validates Notion-side state and also checks referenced Google Calendar events directly through `gog`.
+- `evening-summary` renders the short Telegram-style nightly check-in directly from board state instead of relying on freeform agent wording.
+- Add `@auto-done` to a task's `Review Notes` when a scheduled block should count as completed automatically during `close-day` without being asked again in the evening review.
+- `sync:dashboards` refreshes the root/daily/weekly page navigation from `LIFESTYLE_BOARD.json`, and also replaces the root menu's nested Today/This Week/This Month/This Year memo blocks with live task lists.
+- `sync:all` is the practical "make the live system match the repo" command for wrapper code plus dashboard shells.
 - The CLI assumes your board uses task properties similar to:
   - `Task Name`
   - `Stage`

@@ -3,6 +3,7 @@ import { createCalendarEvent, deleteCalendarEvent, fetchCalendarEvent, fetchCale
 import { dateStart, logCompletion, readCompletions } from "./history.mjs";
 import { archivePage, getPage, updatePageProperties } from "./notion.mjs";
 import {
+  calendarRefsOf,
   carryForwardProperties,
   clearCalendarProperties,
   defaultStageForTask,
@@ -10,11 +11,13 @@ import {
   hasCalendarFields,
   inferHorizon,
   inferNeedsCalendar,
+  isAutoCompleteWhenScheduledTask,
   isActiveTask,
   isDoneTask,
   mirrorRows,
   plusCadence,
   repeatModeOf,
+  scheduledTouchesDate,
   selectRow,
   priorityWeight,
   summary,
@@ -26,6 +29,14 @@ function normalizedInstant(value) {
   if (!value) return null;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? String(value) : new Date(parsed).toISOString();
+}
+
+function deleteCalendarRefs(task) {
+  const refs = calendarRefsOf(task);
+  for (const ref of refs) {
+    if (ref.event_id) deleteCalendarEvent(ref.event_id);
+  }
+  return refs;
 }
 
 function timeZoneOffsetForDate(date, timeZone = "Asia/Jerusalem") {
@@ -121,6 +132,16 @@ function mergeIntervals(intervals) {
 function weekdayName(date) {
   return new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`));
 }
+
+const WEEKDAY_TO_RRULE = {
+  Sunday: "SU",
+  Monday: "MO",
+  Tuesday: "TU",
+  Wednesday: "WE",
+  Thursday: "TH",
+  Friday: "FR",
+  Saturday: "SA"
+};
 
 function endOfWeek(date) {
   const value = new Date(`${date}T00:00:00Z`);
@@ -303,23 +324,114 @@ function weeklyRepeatPressure(task, date) {
 
   const weekEnd = endOfWeek(date);
   const validDates = datesInclusive(date, weekEnd).filter((day) => weekdayAllowed(task, day));
-  const remainingValidDays = validDates.length;
+  const scheduledDates = scheduledOccurrenceDates(task, validDates);
+  const missingNeeded = Math.max(0, remainingNeeded - scheduledDates.length);
+  if (missingNeeded <= 0) return null;
+
+  const unscheduledValidDates = validDates.filter((day) => !scheduledDates.includes(day));
+  const remainingValidDays = unscheduledValidDates.length;
   if (remainingValidDays <= 0) return null;
 
-  const urgency = remainingNeeded >= remainingValidDays ? "mandatory_now" : "optional_this_week";
+  const urgency = missingNeeded >= remainingValidDays ? "mandatory_now" : "optional_this_week";
   const explanation =
     urgency === "mandatory_now"
-      ? `needs ${remainingNeeded} more this week and only ${remainingValidDays} valid day${remainingValidDays === 1 ? "" : "s"} remain`
-      : `needs ${remainingNeeded} more this week and still has ${remainingValidDays} valid day${remainingValidDays === 1 ? "" : "s"} left`;
+      ? `needs ${missingNeeded} more this week and only ${remainingValidDays} valid day${remainingValidDays === 1 ? "" : "s"} remain`
+      : `needs ${missingNeeded} more this week and still has ${remainingValidDays} valid day${remainingValidDays === 1 ? "" : "s"} left`;
 
   return {
     ...taskReviewShape(task),
     remaining_needed: remainingNeeded,
+    missing_needed: missingNeeded,
+    scheduled_count: scheduledDates.length,
+    scheduled_dates: scheduledDates,
     remaining_valid_days: remainingValidDays,
-    valid_dates: validDates,
+    valid_dates: unscheduledValidDates,
     urgency,
     explanation
   };
+}
+
+function parseRRule(line) {
+  if (!line || !/^RRULE:/i.test(line)) return null;
+  const payload = line.replace(/^RRULE:/i, "");
+  const entries = Object.fromEntries(
+    payload
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const [key, value = ""] = part.split("=");
+        return [String(key || "").toUpperCase(), value];
+      })
+  );
+  return entries;
+}
+
+function rruleUntilDate(value) {
+  if (!value) return null;
+  const match = String(value).match(/^(\d{4})(\d{2})(\d{2})/);
+  if (!match) return null;
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+function recurringDatesForEvent(event, validDates) {
+  const rule = Array.isArray(event?.recurrence)
+    ? event.recurrence.map(parseRRule).find(Boolean)
+    : null;
+  if (!rule) return [];
+  if (String(rule.FREQ || "").toUpperCase() !== "WEEKLY") return [];
+
+  const byDay = String(rule.BYDAY || "")
+    .split(",")
+    .map((value) => value.trim().toUpperCase())
+    .filter(Boolean);
+  const untilDate = rruleUntilDate(rule.UNTIL);
+  const startDate =
+    event?.start?.date ||
+    (event?.start?.dateTime ? localParts(event.start.dateTime).date : null);
+  if (!startDate) return [];
+
+  return validDates.filter((day) => {
+    if (day < startDate) return false;
+    if (untilDate && day > untilDate) return false;
+    if (byDay.length === 0) return true;
+    return byDay.includes(WEEKDAY_TO_RRULE[weekdayName(day)] || "");
+  });
+}
+
+function scheduledOccurrenceDates(task, validDates) {
+  const valid = new Set(validDates);
+  const dates = new Set();
+  const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
+  if (scheduledStart) {
+    const day = scheduledStart.slice(0, 10);
+    if (valid.has(day)) dates.add(day);
+  }
+
+  const refs = calendarRefsOf(task);
+  for (const ref of refs) {
+    if (ref.start) {
+      const day = ref.start.slice(0, 10);
+      if (valid.has(day)) dates.add(day);
+    }
+  }
+
+  for (const ref of refs) {
+    if (!ref.event_id) continue;
+    const lookup = fetchCalendarEvent(ref.event_id);
+    if (!lookup.ok || !lookup.event) continue;
+
+    const recurringDates = recurringDatesForEvent(lookup.event, validDates);
+    for (const day of recurringDates) dates.add(day);
+
+    if (recurringDates.length > 0) continue;
+    const eventStart = lookup.event.start?.date || lookup.event.start?.dateTime;
+    if (!eventStart) continue;
+    const day = eventStart.includes("T") ? localParts(eventStart).date : eventStart;
+    if (valid.has(day)) dates.add(day);
+  }
+
+  return Array.from(dates).sort();
 }
 
 function countBy(items, keyFn) {
@@ -385,10 +497,460 @@ function hardTimeProposal(task, dateWindow, fallbackDate) {
   };
 }
 
+function autoCompleteScheduledTask(task, date) {
+  if (!isAutoCompleteWhenScheduledTask(task)) return null;
+  if (!scheduledTouchesDate(task, date)) return null;
+  if (isDoneTask(task)) return null;
+  if (task.properties[TASK_FIELDS.stage] === "blocked") return null;
+
+  const cadence = task.properties[TASK_FIELDS.cadence];
+  const repeatMode = repeatModeOf(task);
+  const repeatTargetCount = Number(task.properties[TASK_FIELDS.repeatTargetCount] || 0);
+  const repeatProgress = Number(task.properties[TASK_FIELDS.repeatProgress] || 0);
+
+  if (repeatMode === "cadence" && cadence && cadence !== "none") {
+    deleteCalendarRefs(task);
+    const next = plusCadence(date, cadence);
+    logCompletion(task, {
+      completed_at: date,
+      mode: "close-day-auto-recurring-roll-forward",
+      next_due: next,
+      source: "close-day"
+    });
+    updatePageProperties(task.id, {
+      [TASK_FIELDS.lastCompletedAt]: dateProperty(date),
+      [TASK_FIELDS.nextDueAt]: dateProperty(next),
+      [TASK_FIELDS.dueDate]: dateProperty(next),
+      [TASK_FIELDS.horizon]: selectProperty(defaultHorizonForCadence(cadence) || task.properties[TASK_FIELDS.horizon] || "this week"),
+      [TASK_FIELDS.status]: selectProperty("todo"),
+      [TASK_FIELDS.stage]: selectProperty("active"),
+      ...clearCalendarProperties()
+    });
+    return {
+      page_id: task.id,
+      title: task.title,
+      mode: "recurring-roll-forward",
+      next_due: next
+    };
+  }
+
+  if (repeatMode === "manual_repeat") {
+    deleteCalendarRefs(task);
+    if (repeatTargetCount > 0) {
+      const nextProgress = Math.min(repeatTargetCount, repeatProgress + 1);
+      const reachedTarget = nextProgress >= repeatTargetCount;
+      logCompletion(task, {
+        completed_at: date,
+        mode: reachedTarget ? "close-day-auto-manual-repeat-window-complete" : "close-day-auto-manual-repeat-progress",
+        source: "close-day",
+        progress: nextProgress,
+        target: repeatTargetCount
+      });
+      updatePageProperties(task.id, {
+        [TASK_FIELDS.repeatProgress]: numberProperty(nextProgress),
+        [TASK_FIELDS.lastCompletedAt]: dateProperty(date),
+        [TASK_FIELDS.status]: selectProperty(reachedTarget ? "done" : "todo"),
+        [TASK_FIELDS.stage]: selectProperty(reachedTarget ? "done" : task.properties[TASK_FIELDS.stage] || "active"),
+        ...clearCalendarProperties()
+      });
+      return {
+        page_id: task.id,
+        title: task.title,
+        mode: reachedTarget ? "manual-repeat-window-complete" : "manual-repeat-progress",
+        progress: nextProgress,
+        target: repeatTargetCount
+      };
+    }
+
+    logCompletion(task, {
+      completed_at: date,
+      mode: "close-day-auto-manual-repeat-done",
+      source: "close-day"
+    });
+    updatePageProperties(task.id, {
+      [TASK_FIELDS.status]: selectProperty("done"),
+      [TASK_FIELDS.stage]: selectProperty("done"),
+      [TASK_FIELDS.lastCompletedAt]: dateProperty(date),
+      [TASK_FIELDS.nextDueAt]: dateProperty(null),
+      ...clearCalendarProperties()
+    });
+    return {
+      page_id: task.id,
+      title: task.title,
+      mode: "manual-repeat-done"
+    };
+  }
+
+  logCompletion(task, {
+    completed_at: date,
+    mode: "close-day-auto-archive-done",
+    source: "close-day"
+  });
+  deleteCalendarRefs(task);
+  archivePage(task.id);
+  return {
+    page_id: task.id,
+    title: task.title,
+    mode: "archived"
+  };
+}
+
 export function cmdShowCompleted(args) {
   const date = normalizeDateArg(args.date);
   const rows = readCompletions(date);
   console.log(JSON.stringify({ date, count: rows.length, rows }, null, 2));
+}
+
+const SYNTHETIC_TITLE_RE = /\be2e\b/i;
+const ROUTINE_SUMMARY_TITLE_RE = /\b(?:daily|weekly|monthly|yearly)\s+overview\s+with\s+openclaw\b/i;
+
+const COMPACT_TITLE_MAP = new Map([
+  ["Define what Notion still needs", "define Notion"],
+  ["Create workout plan", "workout plan"],
+  ["Break startup work into weekly and daily tasks", "startup breakdown"],
+  ["Break envctl work into weekly and daily tasks", "envctl breakdown"],
+  ["Daily meeting in my 9 to 5", "daily meeting"],
+  ["Life priority meeting with OpenClaw", "life priority meeting"],
+  ["envctl weekly planning", "envctl weekly planning"],
+  ["Startup weekly planning", "startup weekly planning"],
+  ["Startup work blocks this week", "startup work"],
+  ["envctl work blocks this week", "envctl work"],
+  ["Workout this week", "workout this week"],
+  ["Coffee with friends this week", "coffee with friends"],
+  ["Call my parents", "call my parents"],
+  ["Pick up post", "pick up post"],
+  ["Meal prepping", "Meal prepping"],
+  ["sam lee", "sam lee"]
+]);
+
+function isSyntheticTaskLike(taskOrTitle) {
+  const title = typeof taskOrTitle === "string" ? taskOrTitle : taskOrTitle?.title || "";
+  return SYNTHETIC_TITLE_RE.test(title);
+}
+
+function isRoutineSummaryTask(taskOrTitle) {
+  const title = typeof taskOrTitle === "string" ? taskOrTitle : taskOrTitle?.title || "";
+  return ROUTINE_SUMMARY_TITLE_RE.test(title);
+}
+
+function includeInHumanSummary(taskOrTitle) {
+  return !isSyntheticTaskLike(taskOrTitle) && !isRoutineSummaryTask(taskOrTitle);
+}
+
+function compactTaskLabel(taskOrTitle) {
+  const title = typeof taskOrTitle === "string" ? taskOrTitle : taskOrTitle?.title || "";
+  if (!title) return "task";
+  if (COMPACT_TITLE_MAP.has(title)) return COMPACT_TITLE_MAP.get(title);
+
+  let label = title
+    .replace(/\s+with OpenClaw$/i, "")
+    .replace(/\s+this week$/i, "")
+    .replace(/\s+blocks$/i, "")
+    .trim();
+
+  if (/^[A-Z]/.test(label) && label !== label.toUpperCase()) {
+    label = label[0].toLowerCase() + label.slice(1);
+  }
+  return label;
+}
+
+function localClock(minutes) {
+  const hour = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const minute = String(minutes % 60).padStart(2, "0");
+  return `${hour}:${minute}`;
+}
+
+function weekdayShort(date) {
+  return new Intl.DateTimeFormat("en-US", { weekday: "short", timeZone: "UTC" }).format(
+    new Date(`${date}T12:00:00Z`)
+  );
+}
+
+function formatSlotLine(start, end, { includeDay = true } = {}) {
+  const startParts = localParts(start);
+  const endParts = localParts(end);
+  const range = `${localClock(startParts.minutes)}-${localClock(endParts.minutes)}`;
+  return includeDay ? `${weekdayShort(startParts.date)} ${range}` : range;
+}
+
+function buildOccupiedByDate(tasks, dateWindow) {
+  const occupiedByDate = new Map();
+  for (const day of dateWindow) {
+    const from = isoLocal(day, 0);
+    const to = isoLocal(day, 23 * 60 + 59);
+    const calendarLookup = fetchCalendarEventsInRange(from, to);
+    const intervals = [];
+    if (calendarLookup.ok) {
+      for (const event of calendarLookup.events || []) {
+        if (event.status === "cancelled") continue;
+        const interval = eventIntervalForDate(event, day);
+        if (interval) intervals.push(interval);
+      }
+    }
+    for (const task of tasks) {
+      const interval = taskIntervalForDate(task, day);
+      if (interval) intervals.push(interval);
+    }
+    occupiedByDate.set(day, mergeIntervals(intervals));
+  }
+  return occupiedByDate;
+}
+
+function addReservedInterval(occupiedByDate, day, interval) {
+  const current = occupiedByDate.get(day) || [];
+  current.push(interval);
+  occupiedByDate.set(day, mergeIntervals(current));
+}
+
+function candidateNeedCount(candidate) {
+  if (candidate.missing_needed) return Math.max(1, Number(candidate.missing_needed));
+  if (candidate.remaining_needed) return Math.max(1, Number(candidate.remaining_needed));
+  return 1;
+}
+
+function flexibleSlotsForTask(task, validDates, occupiedByDate, count) {
+  const slots = [];
+  const durationMinutes = Math.max(15, taskDuration(task));
+  for (const day of validDates) {
+    if (slots.length >= count) break;
+    const windows = candidateWindowsForDate(task, day);
+    if (windows.length === 0) continue;
+    const occupied = occupiedByDate.get(day) || [];
+    const slot = findOpenSlot(occupied, windows, durationMinutes);
+    if (!slot) continue;
+    addReservedInterval(occupiedByDate, day, slot);
+    slots.push({
+      start: isoLocal(day, slot[0]),
+      end: isoLocal(day, slot[1])
+    });
+  }
+  return slots;
+}
+
+function hardTimeSlotsForTask(task, validDates, occupiedByDate, count) {
+  const window = hardTimeWindowFromTask(task);
+  if (!window) return [];
+  const slots = [];
+  for (const day of validDates) {
+    if (slots.length >= count) break;
+    const interval = [window.startMinutes, window.endMinutes];
+    const occupied = occupiedByDate.get(day) || [];
+    const conflict = occupied.some(([busyStart, busyEnd]) => busyStart < interval[1] && busyEnd > interval[0]);
+    if (conflict) continue;
+    addReservedInterval(occupiedByDate, day, interval);
+    slots.push({
+      start: isoLocal(day, interval[0]),
+      end: isoLocal(day, interval[1])
+    });
+  }
+  return slots;
+}
+
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  const output = [];
+  for (const item of items) {
+    const key = keyFn(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(item);
+  }
+  return output;
+}
+
+function candidateScore(candidate, date) {
+  let score = candidate.kind === "weekly_mandatory" ? 1000 : 0;
+  if (candidate.kind === "hard_time_ready") score += 700;
+  if (candidate.kind === "weekly_optional") score += 500;
+  if (candidate.priority === "high") score += 200;
+  if (candidate.priority === "medium") score += 100;
+  if (candidate.due_in_days !== null && candidate.due_in_days !== undefined) {
+    score += Math.max(0, 60 - Math.min(Number(candidate.due_in_days) * 5, 60));
+  }
+  if (candidate.repeat_mode === "manual_repeat") score += 25;
+  if (candidate.horizon === "this week") score += 15;
+  if (candidate.horizon === "today") score += 30;
+  if (candidate.remaining_needed) score += Math.min(Number(candidate.remaining_needed) * 10, 50);
+  if ((candidate.valid_dates || []).includes(date)) score += 15;
+  return score;
+}
+
+export function cmdEveningSummary(args) {
+  const date = normalizeDateArg(args.date);
+  const days = Math.max(1, Number(args.days || 3));
+  const taskLimit = Math.max(1, Number(args["task-limit"] || 3));
+  const tasks = mirrorRows("tasks").filter((task) => task.archived !== true);
+  const activeTasks = tasks.filter((task) => isActiveTask(task) && includeInHumanSummary(task));
+  const completions = readCompletions(date).filter((row) => includeInHumanSummary(row));
+  const completedLabels = uniqueBy(
+    completions.map((row) => compactTaskLabel(row.title)),
+    (label) => label.toLowerCase()
+  );
+
+  const scheduledCarryLabels =
+    completedLabels.length > 0
+      ? []
+      : uniqueBy(
+          activeTasks
+            .filter((task) => task.properties[TASK_FIELDS.status] === "scheduled")
+            .filter((task) => {
+              const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
+              return Boolean(scheduledStart) && scheduledStart.slice(0, 10) <= date;
+            })
+            .filter((task) => task.properties[TASK_FIELDS.horizon] !== "today")
+            .map((task) => compactTaskLabel(task)),
+          (label) => label.toLowerCase()
+        );
+
+  const doneToday = completedLabels.length > 0 ? completedLabels : scheduledCarryLabels;
+
+  const openToday = activeTasks.filter((task) => task.properties[TASK_FIELDS.horizon] === "today");
+  const overdue = activeTasks.filter((task) => {
+    const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
+    return Boolean(dueDate) && dueDate < date && !isDoneTask(task);
+  });
+
+  const needsAttention = uniqueBy(
+    [...openToday, ...overdue]
+      .filter((task) => !doneToday.some((label) => label.toLowerCase() === compactTaskLabel(task).toLowerCase()))
+      .sort((a, b) => {
+        const aScheduled = dateStart(a.properties[TASK_FIELDS.scheduledStart]) ? 0 : 1;
+        const bScheduled = dateStart(b.properties[TASK_FIELDS.scheduledStart]) ? 0 : 1;
+        if (aScheduled !== bScheduled) return aScheduled - bScheduled;
+        const aPriority = priorityWeight(a.properties[TASK_FIELDS.priority]);
+        const bPriority = priorityWeight(b.properties[TASK_FIELDS.priority]);
+        if (aPriority !== bPriority) return bPriority - aPriority;
+        return (a.title || "").localeCompare(b.title || "");
+      }),
+    (task) => task.id
+  );
+
+  const scheduling = [];
+  const decisionsDate = addDays(date, 1);
+  const decisionWindow = Array.from({ length: days }, (_, index) => addDays(decisionsDate, index));
+  const schedulingPayload = (() => {
+    const tasksForDecisions = resolveTaskRows({}).filter((task) => isActiveTask(task) && task.properties[TASK_FIELDS.stage] !== "blocked");
+    const decisionTasks = tasksForDecisions
+      .filter((task) => inferNeedsCalendar(task) || task.properties[TASK_FIELDS.schedulingMode] === "flexible_block")
+      .filter((task) => {
+        const repeatPressure = weeklyRepeatPressure(task, decisionsDate);
+        if (repeatPressure && repeatPressure.missing_needed > 0) return true;
+        return !hasCalendarFields(task);
+      })
+      .filter((task) => (task.properties[TASK_FIELDS.schedulingMode] || null) !== "list_only")
+      .filter((task) => inSchedulingDecisionWindow(task, decisionsDate, addDays(decisionsDate, days - 1), days))
+      .sort((a, b) => comparePlannedTasks(a, b, decisionsDate));
+
+    const hardTimeReady = [];
+    const flexibleToDiscuss = [];
+    const weeklyRepeatMandatory = [];
+    const weeklyRepeatOptional = [];
+
+    for (const task of decisionTasks) {
+      if (!includeInHumanSummary(task)) continue;
+      const repeatPressure = weeklyRepeatPressure(task, decisionsDate);
+      if (repeatPressure) {
+        if (repeatPressure.urgency === "mandatory_now") weeklyRepeatMandatory.push(repeatPressure);
+        else weeklyRepeatOptional.push(repeatPressure);
+      }
+
+      const mode = task.properties[TASK_FIELDS.schedulingMode] || "flexible_block";
+      if (mode === "hard_time") {
+        const proposal = hardTimeProposal(task, decisionWindow, decisionsDate);
+        if (proposal) {
+          hardTimeReady.push({
+            ...schedulingDecisionShape(task, decisionsDate, "hard-time-ready"),
+            suggested_start: proposal.start,
+            suggested_end: proposal.end,
+            source: proposal.source
+          });
+        }
+        continue;
+      }
+      flexibleToDiscuss.push(schedulingDecisionShape(task, decisionsDate, "flexible-needs-conversational-scheduling"));
+    }
+
+    return { hardTimeReady, flexibleToDiscuss, weeklyRepeatMandatory, weeklyRepeatOptional };
+  })();
+
+  const byId = new Map();
+  for (const item of schedulingPayload.weeklyRepeatMandatory) {
+    byId.set(item.id, { ...item, kind: "weekly_mandatory" });
+  }
+  for (const item of schedulingPayload.hardTimeReady) {
+    if (!byId.has(item.id)) byId.set(item.id, { ...item, kind: "hard_time_ready" });
+  }
+  for (const item of schedulingPayload.weeklyRepeatOptional) {
+    if (byId.has(item.id)) continue;
+    byId.set(item.id, { ...item, kind: "weekly_optional" });
+  }
+  for (const item of schedulingPayload.flexibleToDiscuss) {
+    if (!byId.has(item.id)) byId.set(item.id, { ...item, kind: "flexible" });
+  }
+
+  const occupiedByDate = buildOccupiedByDate(activeTasks, datesInclusive(decisionsDate, addDays(date, days)));
+  const scheduleCandidates = Array.from(byId.values())
+    .filter((item) => includeInHumanSummary(item))
+    .sort((a, b) => candidateScore(b, decisionsDate) - candidateScore(a, decisionsDate))
+    .slice(0, taskLimit);
+
+  for (const candidate of scheduleCandidates) {
+    const task = getPage(candidate.id);
+    const validDates =
+      candidate.valid_dates && candidate.valid_dates.length > 0
+        ? candidate.valid_dates
+        : datesInclusive(decisionsDate, addDays(decisionsDate, days - 1));
+    const neededCount =
+      candidate.kind === "weekly_mandatory" || candidate.kind === "weekly_optional"
+        ? Math.min(candidateNeedCount(candidate), validDates.length)
+        : 1;
+    const slots =
+      task.properties[TASK_FIELDS.schedulingMode] === "hard_time"
+        ? hardTimeSlotsForTask(task, validDates, occupiedByDate, neededCount)
+        : flexibleSlotsForTask(task, validDates, occupiedByDate, neededCount);
+    if (slots.length === 0) continue;
+    scheduling.push({
+      label: compactTaskLabel(task),
+      reason: candidate.kind === "weekly_mandatory" ? candidate.explanation : null,
+      lines: slots.map((slot) => formatSlotLine(slot.start, slot.end))
+    });
+  }
+
+  const lines = [];
+
+  if (doneToday.length > 0) {
+    lines.push("✅ **Done today:**", "");
+    for (const label of doneToday) {
+      lines.push(`• **${label}**`);
+    }
+    lines.push("");
+  }
+
+  if (needsAttention.length > 0) {
+    lines.push("⚠️ **Needs attention:**", "");
+    lines.push("❌/✅ Is it Done? (The tasks below were scheduled but not marked as complete):", "");
+    for (const task of needsAttention) {
+      lines.push(`• **${compactTaskLabel(task)}** - Done? Reschedule?`);
+    }
+    lines.push("");
+  }
+
+  if (scheduling.length > 0) {
+    lines.push("📅 **Schedule these**", "");
+    for (const item of scheduling) {
+      lines.push(`• **${item.label}**`);
+      if (item.reason) {
+        lines.push(`Must schedule this week: ${item.reason}.`);
+      }
+      for (const line of item.lines) {
+        lines.push(line);
+      }
+      lines.push("");
+    }
+  }
+
+  const output = lines.join("\n").trim();
+  console.log(output || "✅ **Done today:**\n\n• nothing real closed yet");
 }
 
 function nextManualRepeatDate(task, date) {
@@ -453,9 +1015,7 @@ export function cmdRefreshManualRepeat(args) {
   const refreshed = [];
   if (apply) {
     for (const item of candidates) {
-      if (item.task.properties[TASK_FIELDS.calendarEventId]) {
-        deleteCalendarEvent(item.task.properties[TASK_FIELDS.calendarEventId]);
-      }
+      deleteCalendarRefs(item.task);
       updatePageProperties(item.task.id, {
         [TASK_FIELDS.dueDate]: dateProperty(item.proposal.next_due),
         [TASK_FIELDS.nextDueAt]: dateProperty(item.proposal.next_due),
@@ -483,9 +1043,7 @@ export function cmdRefreshManualRepeat(args) {
 export function cmdCloseDay(args) {
   const date = normalizeDateArg(args.date);
   const carryTo = args["carry-to"] || null;
-  const tasks = resolveTaskRows(args).filter(
-    (task) => task.properties[TASK_FIELDS.horizon] === "today" && task.archived !== true
-  );
+  const tasks = resolveTaskRows(args).filter((task) => task.archived !== true);
 
   const archivedOneTime = [];
   const rolledRecurring = [];
@@ -493,14 +1051,33 @@ export function cmdCloseDay(args) {
   const carryCandidates = [];
   const carriedForward = [];
   const blocked = [];
+  const autoCompleted = [];
 
   for (const task of tasks) {
+    const isTodayTask = task.properties[TASK_FIELDS.horizon] === "today";
     const cadence = task.properties[TASK_FIELDS.cadence];
     const repeatMode = repeatModeOf(task);
+    const autoCompletion = autoCompleteScheduledTask(task, date);
+
+    if (autoCompletion) {
+      autoCompleted.push(autoCompletion);
+      if (autoCompletion.mode === "recurring-roll-forward") {
+        rolledRecurring.push({
+          page_id: task.id,
+          title: task.title,
+          next_due: autoCompletion.next_due
+        });
+      } else if (autoCompletion.mode === "archived") {
+        archivedOneTime.push({ page_id: task.id, title: task.title });
+      }
+      continue;
+    }
+
+    if (!isTodayTask) continue;
 
     if (isDoneTask(task)) {
       if (repeatMode === "cadence" && cadence && cadence !== "none") {
-        if (task.properties[TASK_FIELDS.calendarEventId]) deleteCalendarEvent(task.properties[TASK_FIELDS.calendarEventId]);
+        deleteCalendarRefs(task);
         const next = plusCadence(date, cadence);
         logCompletion(task, {
           completed_at: date,
@@ -522,7 +1099,7 @@ export function cmdCloseDay(args) {
       }
 
       if (repeatMode === "manual_repeat") {
-        if (task.properties[TASK_FIELDS.calendarEventId]) deleteCalendarEvent(task.properties[TASK_FIELDS.calendarEventId]);
+        deleteCalendarRefs(task);
         const patch = {
           ...clearCalendarProperties(),
           [TASK_FIELDS.nextDueAt]: dateProperty(null)
@@ -540,7 +1117,7 @@ export function cmdCloseDay(args) {
         mode: "close-day-archive-done",
         source: "close-day"
       });
-      if (task.properties[TASK_FIELDS.calendarEventId]) deleteCalendarEvent(task.properties[TASK_FIELDS.calendarEventId]);
+      deleteCalendarRefs(task);
       archivePage(task.id);
       archivedOneTime.push({ page_id: task.id, title: task.title });
       continue;
@@ -556,10 +1133,8 @@ export function cmdCloseDay(args) {
       const hadCalendarState =
         Boolean(dateStart(task.properties[TASK_FIELDS.scheduledStart])) ||
         Boolean(dateStart(task.properties[TASK_FIELDS.scheduledEnd])) ||
-        Boolean(task.properties[TASK_FIELDS.calendarEventId]);
-      if (hadCalendarState && task.properties[TASK_FIELDS.calendarEventId]) {
-        deleteCalendarEvent(task.properties[TASK_FIELDS.calendarEventId]);
-      }
+        calendarRefsOf(task).length > 0;
+      if (hadCalendarState) deleteCalendarRefs(task);
       updatePageProperties(task.id, carryForwardProperties(carryTo, nextMissCount));
       carriedForward.push({
         page_id: task.id,
@@ -581,6 +1156,7 @@ export function cmdCloseDay(args) {
     archived_one_time: archivedOneTime,
     rolled_recurring: rolledRecurring,
     preserved_manual_repeat: preservedManualRepeat,
+    auto_completed: autoCompleted,
     carry_candidates: carryCandidates,
     carried_forward: carriedForward,
     blocked
@@ -666,7 +1242,8 @@ export function cmdReconcileCalendar(args) {
     const needsCalendar = task.properties[TASK_FIELDS.needsCalendar] === true;
     const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
     const scheduledEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
-    const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+    const refs = calendarRefsOf(task);
+    const eventId = refs[0]?.event_id || "";
     const archived = task.archived === true || stage === "archived";
     const base = summary(task);
 
@@ -722,18 +1299,18 @@ export function cmdReconcileCalendar(args) {
         }
       }
     }
-    if (eventId && !scheduledStart && !scheduledEnd && status !== "done" && !archived) {
+    if (refs.length > 0 && !scheduledStart && !scheduledEnd && status !== "done" && !archived) {
       staleEventWithoutSchedule.push(base);
       if (applyClearStale) {
-        deleteCalendarEvent(eventId);
+        deleteCalendarRefs(task);
         updatePageProperties(task.id, clearCalendarProperties());
         cleared.push({ page_id: task.id, title: task.title, reason: "event-ref-without-schedule" });
       }
     }
-    if (eventId && (status === "done" || stage === "done" || archived)) {
+    if (refs.length > 0 && (status === "done" || stage === "done" || archived)) {
       completedWithEventRef.push(base);
       if (applyClearStale) {
-        deleteCalendarEvent(eventId);
+        deleteCalendarRefs(task);
         updatePageProperties(task.id, clearCalendarProperties());
         cleared.push({ page_id: task.id, title: task.title, reason: "done-or-archived-with-event-ref" });
       }

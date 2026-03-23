@@ -31,6 +31,8 @@ const HORIZON_ORDER = {
   "this year": 3
 };
 
+const MULTI_EVENT_PREFIX = "multi:";
+
 export function board() {
   return loadJson(resolveBoardPath(BOARD_PATH));
 }
@@ -107,22 +109,97 @@ export function summary(row) {
     scheduling_mode: row.properties[TASK_FIELDS.schedulingMode] || null,
     due_date: dateStart(row.properties[TASK_FIELDS.dueDate]),
     scheduled_start: dateStart(row.properties[TASK_FIELDS.scheduledStart]),
-    needs_calendar: row.properties[TASK_FIELDS.needsCalendar]
+    needs_calendar: row.properties[TASK_FIELDS.needsCalendar],
+    auto_complete_when_scheduled: isAutoCompleteWhenScheduledTask(row)
   };
+}
+
+export function reviewNotesOf(task) {
+  return String(task?.properties?.[TASK_FIELDS.reviewNotes] || "");
+}
+
+export function isAutoCompleteWhenScheduledTask(task) {
+  const notes = normalize(reviewNotesOf(task));
+  return (
+    notes.includes("@auto-done") ||
+    notes.includes("@auto-done-scheduled") ||
+    notes.includes("@auto-complete-scheduled") ||
+    notes.includes("auto done when scheduled")
+  );
+}
+
+export function scheduledTouchesDate(task, date) {
+  const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
+  const scheduledEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]) || scheduledStart;
+  if (!scheduledStart || !scheduledEnd || !date) return false;
+  const startDay = scheduledStart.slice(0, 10);
+  const endDay = scheduledEnd.slice(0, 10);
+  return startDay <= date && endDay >= date;
 }
 
 export function scheduleStateOf(task) {
   const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
   const scheduledEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
-  const calendarEventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+  const calendarRefs = calendarRefsOf(task);
+  const calendarEventId = calendarRefs[0]?.event_id || "";
 
+  if (calendarRefs.length > 1) return "scheduled_multi";
   if (scheduledStart && scheduledEnd && calendarEventId) return "scheduled_linked";
   if (scheduledStart && scheduledEnd) return "scheduled_unlinked";
   if (calendarEventId) return "linked_without_schedule";
   return "unscheduled";
 }
 
+function normalizeCalendarRef(ref) {
+  if (!ref || !ref.event_id) return null;
+  return {
+    event_id: String(ref.event_id),
+    start: ref.start || null,
+    end: ref.end || null
+  };
+}
+
+export function calendarRefsOf(task) {
+  const raw = task.properties[TASK_FIELDS.calendarEventId] || "";
+  if (!raw) return [];
+  if (typeof raw === "string" && raw.startsWith(MULTI_EVENT_PREFIX)) {
+    try {
+      const parsed = JSON.parse(raw.slice(MULTI_EVENT_PREFIX.length));
+      const refs = Array.isArray(parsed) ? parsed : parsed?.refs;
+      if (Array.isArray(refs)) {
+        return refs.map(normalizeCalendarRef).filter(Boolean);
+      }
+    } catch {
+      return [];
+    }
+  }
+
+  return [
+    {
+      event_id: String(raw),
+      start: dateStart(task.properties[TASK_FIELDS.scheduledStart]),
+      end: dateStart(task.properties[TASK_FIELDS.scheduledEnd])
+    }
+  ].filter((ref) => ref.event_id);
+}
+
+export function calendarEventIdsOf(task) {
+  return calendarRefsOf(task).map((ref) => ref.event_id).filter(Boolean);
+}
+
+export function primaryCalendarRefOf(task) {
+  return calendarRefsOf(task)[0] || null;
+}
+
+export function encodeCalendarRefs(refs) {
+  const cleaned = (refs || []).map(normalizeCalendarRef).filter(Boolean);
+  if (cleaned.length === 0) return richTextProperty("");
+  if (cleaned.length === 1) return richTextProperty(cleaned[0].event_id);
+  return richTextProperty(`${MULTI_EVENT_PREFIX}${JSON.stringify(cleaned)}`);
+}
+
 export function taskLookupSummary(task) {
+  const calendarRefs = calendarRefsOf(task);
   return {
     page_id: task.id,
     title: task.title,
@@ -133,8 +210,10 @@ export function taskLookupSummary(task) {
     type: task.properties[TASK_FIELDS.type] || null,
     repeat_mode: repeatModeOf(task),
     schedule_state: scheduleStateOf(task),
+    auto_complete_when_scheduled: isAutoCompleteWhenScheduledTask(task),
     needs_calendar: task.properties[TASK_FIELDS.needsCalendar] === true,
-    calendar_event_id: task.properties[TASK_FIELDS.calendarEventId] || null,
+    calendar_event_id: calendarRefs[0]?.event_id || null,
+    calendar_event_ids: calendarRefs.map((ref) => ref.event_id),
     scheduled_start: dateStart(task.properties[TASK_FIELDS.scheduledStart]),
     scheduled_end: dateStart(task.properties[TASK_FIELDS.scheduledEnd]),
     created_time: task.created_time || null,
@@ -407,7 +486,7 @@ export function hasCalendarFields(task) {
   return Boolean(
     dateStart(task.properties[TASK_FIELDS.scheduledStart]) ||
       dateStart(task.properties[TASK_FIELDS.scheduledEnd]) ||
-      task.properties[TASK_FIELDS.calendarEventId]
+      calendarRefsOf(task).length > 0
   );
 }
 

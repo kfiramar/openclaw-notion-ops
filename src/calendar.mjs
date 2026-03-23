@@ -79,7 +79,12 @@ export function fetchCalendarEventsInRange(from, to, calendarId = PRIMARY_CALEND
   }
 }
 
-export function createCalendarEvent(summaryText, start, end, calendarId = PRIMARY_CALENDAR_ID) {
+function recurrenceArgs(rrules = []) {
+  const values = Array.isArray(rrules) ? rrules : (rrules ? [rrules] : []);
+  return values.flatMap((rule) => ["--rrule", rule]);
+}
+
+export function createCalendarEvent(summaryText, start, end, calendarId = PRIMARY_CALENDAR_ID, options = {}) {
   const output = runCalendar([
     "calendar",
     "create",
@@ -90,12 +95,13 @@ export function createCalendarEvent(summaryText, start, end, calendarId = PRIMAR
     start,
     "--to",
     end,
+    ...recurrenceArgs(options.rrules),
     "--json"
   ]);
   return parseJsonOutput(output);
 }
 
-export function updateCalendarEvent(eventId, summaryText, start, end, calendarId = PRIMARY_CALENDAR_ID) {
+export function updateCalendarEvent(eventId, summaryText, start, end, calendarId = PRIMARY_CALENDAR_ID, options = {}) {
   const output = runCalendar([
     "calendar",
     "update",
@@ -107,6 +113,7 @@ export function updateCalendarEvent(eventId, summaryText, start, end, calendarId
     start,
     "--to",
     end,
+    ...recurrenceArgs(options.rrules),
     "--json"
   ]);
   return parseJsonOutput(output);

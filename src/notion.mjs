@@ -149,8 +149,23 @@ function resolveBoardPath(filePath) {
   ]);
 }
 
+function ensureWritableMirrorDir(filePath) {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.accessSync(dir, fs.constants.W_OK);
+  } catch (error) {
+    const stat = fs.statSync(dir);
+    const mode = (stat.mode & 0o777).toString(8);
+    throw new Error(
+      `mirror directory is not writable: ${dir} (uid=${stat.uid} gid=${stat.gid} mode=${mode}). ` +
+        `Fix with: chown -R node:node ${dir}`
+    );
+  }
+}
+
 function writeJsonAtomic(filePath, payload) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  ensureWritableMirrorDir(filePath);
   const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
   fs.writeFileSync(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   fs.renameSync(tempPath, filePath);

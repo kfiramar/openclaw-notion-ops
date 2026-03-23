@@ -2,7 +2,7 @@ import path from "node:path";
 
 const CWD = process.cwd();
 
-export const CONTAINER = process.env.OPENCLAW_CONTAINER || "openclaw-openclaw-1";
+export const CONTAINER = process.env.OPENCLAW_CONTAINER || "openclaw-pma3-openclaw-1";
 export const PRIMARY_CALENDAR_ID = process.env.PRIMARY_CALENDAR_ID || "suukpehoy@gmail.com";
 export const NOTION_API = process.env.NOTION_API_PATH || "/data/.openclaw/skills/notion-api/scripts/notion-api.mjs";
 export const MIRROR_ROOT = process.env.NOTION_MIRROR_ROOT || "/data/.openclaw/notion-mirror";

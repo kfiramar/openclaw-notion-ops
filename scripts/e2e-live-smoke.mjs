@@ -39,8 +39,28 @@ function shellJson(command, args, { timeoutMs = 120000 } = {}) {
   }
 }
 
+function shellText(command, args, { timeoutMs = 120000 } = {}) {
+  try {
+    return execFileSync(command, args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+      killSignal: "SIGKILL"
+    });
+  } catch (error) {
+    const stdout = String(error.stdout || "").trim();
+    const stderr = String(error.stderr || "").trim();
+    const detail = stdout || stderr || error.message;
+    throw new Error(`${command} ${args.join(" ")} failed: ${detail}`);
+  }
+}
+
 function runWrapper(args, options = {}) {
   return shellJson("node", [WRAPPER_PATH, ...args], options);
+}
+
+function runWrapperText(args, options = {}) {
+  return shellText("node", [WRAPPER_PATH, ...args], options);
 }
 
 function runGog(args, options = {}) {
@@ -407,6 +427,84 @@ await step("close-day-archives-done-one-time", async () => {
   return { page_id: pageId };
 });
 
+await step("close-day-auto-completes-scheduled-manual-repeat", async () => {
+  const add = runWrapper([
+    "add-task",
+    "--title",
+    title("Auto Done Scheduled"),
+    "--date",
+    BASE_DATE,
+    "--horizon",
+    "this week",
+    "--stage",
+    "planned",
+    "--repeat-mode",
+    "manual_repeat",
+    "--cadence",
+    "weekly",
+    "--repeat-window",
+    "week",
+    "--repeat-target-count",
+    "5",
+    "--repeat-days",
+    "Sunday,Monday,Tuesday,Wednesday,Thursday",
+    "--scheduling-mode",
+    "hard_time",
+    "--schedule-type",
+    "hard",
+    "--needs-calendar",
+    "true",
+    "--notes",
+    "09:00-09:30 @auto-done"
+  ]);
+  const pageId = recordTask(add.page_id);
+
+  const set = runWrapper([
+    "set-schedule",
+    "--page-id",
+    pageId,
+    "--start",
+    "2026-03-22T09:00:00+02:00",
+    "--end",
+    "2026-03-22T09:30:00+02:00",
+    "--schedule-type",
+    "hard",
+    "--scheduling-mode",
+    "hard_time"
+  ]);
+  const oldEventId = set.calendar_event_id;
+
+  const closeDay = runWrapper(["close-day", "--page-id", pageId, "--date", BASE_DATE]);
+  assert(closeDay.auto_completed?.length === 1, "close-day did not auto-complete the scheduled task");
+
+  const task = inspectTask(pageId);
+  assert(Number(task.properties["Repeat Progress"] || 0) === 1, "auto-complete did not increment repeat progress");
+  assert(fieldDate(task.properties["Last Completed At"]) === BASE_DATE, "auto-complete did not set last completed at");
+  assert(!task.properties["Calendar Event ID"], "auto-complete left calendar link behind");
+  assert(!task.properties["Scheduled Start"], "auto-complete left scheduled start behind");
+
+  const completions = runWrapper(["show-completed", "--date", BASE_DATE]);
+  const matchingCompletion = (completions.rows || []).find(
+    (row) => row.page_id === pageId && /close-day-auto-manual-repeat-progress/i.test(String(row.mode || ""))
+  );
+  assert(matchingCompletion, "auto-complete did not write a completion log row");
+
+  let eventState = "missing";
+  try {
+    const event = eventFetch(oldEventId);
+    eventState = event.status || "found";
+  } catch {
+    eventState = "missing";
+  }
+
+  return {
+    page_id: pageId,
+    old_event_id: oldEventId,
+    repeat_progress: task.properties["Repeat Progress"] || 0,
+    event_state: eventState
+  };
+});
+
 await step("cadence-roll-forward", async () => {
   const add = runWrapper([
     "add-task",
@@ -677,6 +775,73 @@ await step("verify-task-and-verify-flows", async () => {
   };
 });
 
+await step("set-series-schedule-grouped-repeat", async () => {
+  const add = runWrapper([
+    "add-task",
+    "--title",
+    title("Grouped Daily Meeting"),
+    "--date",
+    BASE_DATE,
+    "--horizon",
+    "this week",
+    "--stage",
+    "planned",
+    "--repeat-mode",
+    "manual_repeat",
+    "--cadence",
+    "weekly",
+    "--repeat-window",
+    "week",
+    "--repeat-target-count",
+    "4",
+    "--repeat-days",
+    "Monday,Tuesday,Wednesday,Thursday",
+    "--scheduling-mode",
+    "hard_time",
+    "--schedule-type",
+    "hard",
+    "--needs-calendar",
+    "true"
+  ]);
+  const pageId = recordTask(add.page_id);
+
+  const set = runWrapper([
+    "set-series-schedule",
+    "--page-id",
+    pageId,
+    "--from-date",
+    "2026-03-23",
+    "--to-date",
+    "2026-03-26",
+    "--days",
+    "Monday,Tuesday,Wednesday,Thursday",
+    "--start-time",
+    "11:30",
+    "--end-time",
+    "12:00",
+    "--schedule-type",
+    "hard",
+    "--scheduling-mode",
+    "hard_time"
+  ]);
+
+  assert(set.calendar_event_id, "set-series-schedule did not return a calendar event id");
+  const verify = verifySchedule(pageId);
+  assert(verify.synced === true, "set-series-schedule did not produce a synced task");
+  const task = inspectTask(pageId);
+  assert(fieldDate(task.properties["Scheduled Start"]) === "2026-03-23T11:30:00+02:00", "series task did not store first occurrence start");
+  const event = eventFetch(set.calendar_event_id);
+  const recurrence = event.recurrence || [];
+  assert(recurrence.some((line) => /BYDAY=MO,TU,WE,TH/.test(line)), "series event is missing BYDAY recurrence");
+  assert(recurrence.some((line) => /UNTIL=20260326T/.test(line)), "series event is missing UNTIL recurrence");
+
+  return {
+    page_id: pageId,
+    calendar_event_id: set.calendar_event_id,
+    recurrence
+  };
+});
+
 await step("explicit-link-schedule", async () => {
   const summary = title("Direct Link");
   const start = "2026-03-22T14:00:00+02:00";
@@ -917,6 +1082,71 @@ await step("routine-window-stays-manual", async () => {
   assert(sweep.skipped[0].reason === "needs-explicit-window", "routine-window task skipped with wrong reason");
 
   return { page_id: pageId };
+});
+
+await step("evening-summary-missing-occurrence-count", async () => {
+  const add = runWrapper([
+    "add-task",
+    "--title",
+    title("Summary Missing Count"),
+    "--date",
+    BASE_DATE,
+    "--horizon",
+    "this week",
+    "--stage",
+    "planned",
+    "--repeat-mode",
+    "manual_repeat",
+    "--cadence",
+    "weekly",
+    "--repeat-window",
+    "week",
+    "--repeat-target-count",
+    "4",
+    "--repeat-days",
+    "Monday,Tuesday,Wednesday,Thursday",
+    "--scheduling-mode",
+    "flexible_block",
+    "--schedule-type",
+    "soft",
+    "--needs-calendar",
+    "true",
+    "--estimated-minutes",
+    "30"
+  ]);
+  const pageId = recordTask(add.page_id);
+
+  runWrapper([
+    "set-schedule",
+    "--page-id",
+    pageId,
+    "--start",
+    "2026-03-26T11:30:00+02:00",
+    "--end",
+    "2026-03-26T12:00:00+02:00"
+  ]);
+
+  const summary = runWrapperText(["evening-summary", "--date", BASE_DATE, "--days", "4", "--task-limit", "20"]);
+  const lines = summary.split(/\r?\n/);
+  const blockStart = lines.findIndex((line) => /summary missing count/i.test(line));
+  assert(blockStart >= 0, "evening-summary did not include the grouped-repeat smoke task");
+
+  const block = [];
+  for (let index = blockStart + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) break;
+    if (line.startsWith("• **")) break;
+    block.push(line);
+  }
+
+  const slotLines = block.filter((line) => /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\d{2}:\d{2}-\d{2}:\d{2}$/.test(line));
+  assert(block[0] === "Must schedule this week: needs 3 more this week and only 3 valid days remain.", "evening-summary explanation did not subtract the already scheduled occurrence");
+  assert(slotLines.length === 3, "evening-summary did not offer exactly the missing number of future slots");
+
+  return {
+    page_id: pageId,
+    slot_lines: slotLines
+  };
 });
 
 await step("show-completed-log", async () => {

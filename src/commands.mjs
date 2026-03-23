@@ -11,10 +11,12 @@ import {
 } from "./notion.mjs";
 import {
   board,
+  calendarRefsOf,
   classifyHorizonMove,
   clearCalendarProperties,
   defaultStageForTask,
   defaultHorizonForCadence,
+  encodeCalendarRefs,
   findTask,
   inferHorizon,
   inferNeedsCalendar,
@@ -26,6 +28,7 @@ import {
   matchTasks,
   mirrorRows,
   plusCadence,
+  primaryCalendarRefOf,
   repeatModeOf,
   resolveRelationArg,
   resolveTaskView,
@@ -36,6 +39,7 @@ import {
   summary
 } from "./tasks.mjs";
 import {
+  addDays,
   boolOrNull,
   checkboxProperty,
   dateProperty,
@@ -81,6 +85,45 @@ function normalizedInstant(value) {
   return Number.isNaN(parsed) ? String(value) : new Date(parsed).toISOString();
 }
 
+function deleteCalendarRefs(task) {
+  const refs = calendarRefsOf(task);
+  for (const ref of refs) {
+    if (ref.event_id) deleteCalendarEvent(ref.event_id);
+  }
+  return refs;
+}
+
+function eventStorageForRefs(refs) {
+  const ordered = (refs || [])
+    .filter((ref) => ref?.event_id)
+    .sort((a, b) => Date.parse(a.start || "") - Date.parse(b.start || ""));
+  const first = ordered[0] || null;
+  return {
+    refs: ordered,
+    first
+  };
+}
+
+const WEEKDAY_TO_INDEX = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6
+};
+
+const WEEKDAY_TO_RRULE = {
+  sunday: "SU",
+  monday: "MO",
+  tuesday: "TU",
+  wednesday: "WE",
+  thursday: "TH",
+  friday: "FR",
+  saturday: "SA"
+};
+
 function startOfWeek(date) {
   const value = new Date(`${date}T00:00:00Z`);
   value.setUTCDate(value.getUTCDate() - value.getUTCDay());
@@ -101,6 +144,119 @@ function repeatAnchorDate({ repeatMode = null, cadence = null, repeatWindow = nu
     return baseDate;
   }
   return null;
+}
+
+function parseWeekdayList(value) {
+  return String(value || "")
+    .split(",")
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean)
+    .map((part) => {
+      if (!(part in WEEKDAY_TO_INDEX)) {
+        throw new Error(`invalid weekday: ${part}`);
+      }
+      return part;
+    });
+}
+
+function parseClock(value, label) {
+  const match = String(value || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) throw new Error(`${label} must be HH:MM`);
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) throw new Error(`${label} must be HH:MM`);
+  return hours * 60 + minutes;
+}
+
+function timeZoneOffsetForDate(date, timeZone = "Asia/Jerusalem") {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    timeZoneName: "shortOffset",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(`${date}T12:00:00Z`));
+  const zoneName = parts.find((part) => part.type === "timeZoneName")?.value || "GMT+0";
+  const match = zoneName.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/i);
+  if (!match) return "+00:00";
+  const [, sign, hours, minutes] = match;
+  return `${sign}${String(hours).padStart(2, "0")}:${minutes || "00"}`;
+}
+
+function isoLocal(date, totalMinutes, timeZone = "Asia/Jerusalem") {
+  const hours = String(Math.floor(totalMinutes / 60)).padStart(2, "0");
+  const minutes = String(totalMinutes % 60).padStart(2, "0");
+  return `${date}T${hours}:${minutes}:00${timeZoneOffsetForDate(date, timeZone)}`;
+}
+
+function weekdayIndex(date) {
+  return new Date(`${date}T12:00:00Z`).getUTCDay();
+}
+
+function firstMatchingDate(fromDate, toDate, weekdays) {
+  let cursor = fromDate;
+  while (cursor <= toDate) {
+    if (weekdays.includes(weekdayIndex(cursor))) return cursor;
+    cursor = addDays(cursor, 1);
+  }
+  return null;
+}
+
+function untilStamp(date, endMinutes, timeZone = "Asia/Jerusalem") {
+  const iso = isoLocal(date, endMinutes, timeZone);
+  return new Date(Date.parse(iso)).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function seriesScheduleSpec(task, args) {
+  const fromDate = normalizeDateArg(args["from-date"] || args.date || "today");
+  const toDate = normalizeDateArg(args["to-date"] || fromDate);
+  if (toDate < fromDate) throw new Error("set-series-schedule requires to-date on or after from-date");
+  const weekdayNames = parseWeekdayList(args.days || (task.properties[TASK_FIELDS.repeatDays] || []).join(","));
+  if (weekdayNames.length === 0) {
+    throw new Error("set-series-schedule requires --days or task Repeat Days");
+  }
+  const weekdayIndexes = weekdayNames.map((name) => WEEKDAY_TO_INDEX[name]);
+  const startMinutes = parseClock(args["start-time"], "start-time");
+  const endMinutes = parseClock(args["end-time"], "end-time");
+  if (endMinutes <= startMinutes) throw new Error("set-series-schedule requires end-time after start-time");
+  const timeZone = args["time-zone"] || "Asia/Jerusalem";
+  const firstDate = firstMatchingDate(fromDate, toDate, weekdayIndexes);
+  if (!firstDate) {
+    throw new Error("set-series-schedule found no matching date in the requested range");
+  }
+  const start = isoLocal(firstDate, startMinutes, timeZone);
+  const end = isoLocal(firstDate, endMinutes, timeZone);
+  const byDay = weekdayNames.map((name) => WEEKDAY_TO_RRULE[name]).join(",");
+  const rule = `RRULE:FREQ=WEEKLY;BYDAY=${byDay};UNTIL=${untilStamp(toDate, endMinutes, timeZone)}`;
+
+  return {
+    fromDate,
+    toDate,
+    weekday_names: weekdayNames,
+    start,
+    end,
+    rrule: rule
+  };
+}
+
+function multiScheduleSpec(args) {
+  const raw = String(args.slots || "").trim();
+  if (!raw) throw new Error("set-multi-schedule requires --slots");
+  const refs = raw
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const [start, end] = part.split("|").map((value) => value?.trim() || "");
+      assertScheduleRange("set-multi-schedule", start, end, { requireBoth: true });
+      return { start, end };
+    })
+    .sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+  if (refs.length === 0) throw new Error("set-multi-schedule requires at least one slot");
+  return refs;
 }
 
 function emitJson(payload) {
@@ -136,8 +292,9 @@ function verifyTaskState(pageId, {
   const task = getPage(pageId);
   const taskStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
   const taskEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
-  const currentEventId = task.properties[TASK_FIELDS.calendarEventId] || "";
-  const linked = Boolean(currentEventId);
+  const refs = calendarRefsOf(task);
+  const currentEventId = refs[0]?.event_id || "";
+  const linked = refs.length > 0;
   const scheduled = Boolean(taskStart) && Boolean(taskEnd);
   const lookupEventId = currentEventId || priorCalendarEventId || "";
 
@@ -151,19 +308,33 @@ function verifyTaskState(pageId, {
   const calendarStart = event?.start?.dateTime || event?.start?.date || null;
   const calendarEnd = event?.end?.dateTime || event?.end?.date || null;
   const calendarStatus = event?.status || (lookup?.notFound ? "not_found" : null);
+  const refsSynced = refs.every((ref) => {
+    if (!ref.event_id) return false;
+    const refLookup = fetchCalendarEvent(ref.event_id);
+    if (!refLookup.ok) return false;
+    const refEvent = refLookup.event || null;
+    if (!refEvent || refEvent.status === "cancelled") return false;
+    const refStart = refEvent.start?.dateTime || refEvent.start?.date || null;
+    const refEnd = refEvent.end?.dateTime || refEvent.end?.date || null;
+    return normalizedInstant(ref.start || taskStart) === normalizedInstant(refStart)
+      && normalizedInstant(ref.end || taskEnd) === normalizedInstant(refEnd);
+  });
   const scheduleSynced =
     linked &&
     scheduled &&
-    Boolean(event) &&
-    calendarStatus !== "cancelled" &&
-    normalizedInstant(taskStart) === normalizedInstant(calendarStart) &&
-    normalizedInstant(taskEnd) === normalizedInstant(calendarEnd);
+    (refs.length > 1
+      ? refsSynced
+      : Boolean(event) &&
+        calendarStatus !== "cancelled" &&
+        normalizedInstant(taskStart) === normalizedInstant(calendarStart) &&
+        normalizedInstant(taskEnd) === normalizedInstant(calendarEnd));
 
   const actual = {
     ...taskLookupSummary(task),
     linked,
     scheduled,
     schedule_synced: scheduleSynced,
+    calendar_event_ids: refs.map((ref) => ref.event_id),
     calendar_lookup_event_id: lookupEventId || null,
     calendar_event_status: calendarStatus,
     calendar_start: calendarStart,
@@ -484,11 +655,17 @@ export function cmdMoveTask(args) {
 
   let calendarEventIdUpdate;
   if (hasScheduledStart && hasScheduledEnd) {
-    const existingEventId = task.properties[TASK_FIELDS.calendarEventId] || "";
-    const event = existingEventId
-      ? updateCalendarEvent(existingEventId, task.title, args["scheduled-start"], args["scheduled-end"])
+    const refs = calendarRefsOf(task);
+    const reusableRef = refs.length === 1 ? refs[0] : null;
+    if (!reusableRef && refs.length > 1) deleteCalendarRefs(task);
+    const event = reusableRef
+      ? updateCalendarEvent(reusableRef.event_id, task.title, args["scheduled-start"], args["scheduled-end"])
       : createCalendarEvent(task.title, args["scheduled-start"], args["scheduled-end"]);
-    calendarEventIdUpdate = richTextProperty(event.id);
+    calendarEventIdUpdate = encodeCalendarRefs([{
+      event_id: event.id,
+      start: args["scheduled-start"],
+      end: args["scheduled-end"]
+    }]);
   }
 
   updatePageProperties(task.id, {
@@ -587,9 +764,7 @@ export function cmdDefer(args) {
   const nextStatus =
     args.status ||
     (targetStage === "blocked" ? "blocked" : "todo");
-  const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
-
-  if (!keepSchedule && eventId) deleteCalendarEvent(eventId);
+  if (!keepSchedule) deleteCalendarRefs(task);
 
   updatePageProperties(task.id, {
     [TASK_FIELDS.horizon]: selectProperty(to),
@@ -635,10 +810,10 @@ export function cmdCompleteTask(args) {
   const repeatMode = repeatModeOf(task);
   const repeatTargetCount = Number(task.properties[TASK_FIELDS.repeatTargetCount] || 0);
   const repeatProgress = Number(task.properties[TASK_FIELDS.repeatProgress] || 0);
-  const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+  const refs = calendarRefsOf(task);
 
   if (repeatMode === "cadence" && cadence && cadence !== "none") {
-    if (eventId) deleteCalendarEvent(eventId);
+    deleteCalendarRefs(task);
     const next = plusCadence(when, cadence);
     logCompletion(task, {
       completed_at: when,
@@ -663,7 +838,7 @@ export function cmdCompleteTask(args) {
 
   if (repeatMode === "manual_repeat") {
     if (repeatTargetCount > 0) {
-      if (eventId) deleteCalendarEvent(eventId);
+      deleteCalendarRefs(task);
       const nextProgress = Math.min(repeatTargetCount, repeatProgress + 1);
       const reachedTarget = nextProgress >= repeatTargetCount;
       logCompletion(task, {
@@ -697,7 +872,7 @@ export function cmdCompleteTask(args) {
       mode: "manual-repeat-done",
       source: "complete-task"
     });
-    if (eventId) deleteCalendarEvent(eventId);
+    deleteCalendarRefs(task);
     updatePageProperties(task.id, {
       [TASK_FIELDS.status]: selectProperty("done"),
       [TASK_FIELDS.stage]: selectProperty("done"),
@@ -722,7 +897,7 @@ export function cmdCompleteTask(args) {
       mode: "archived",
       source: "complete-task"
     });
-    if (eventId) deleteCalendarEvent(eventId);
+    deleteCalendarRefs(task);
     archivePage(task.id);
     console.log(JSON.stringify({ ok: true, action: "complete-task", mode: "archived", page_id: task.id, task: task.title }, null, 2));
     return;
@@ -733,7 +908,7 @@ export function cmdCompleteTask(args) {
     mode: "done",
     source: "complete-task"
   });
-  if (eventId) deleteCalendarEvent(eventId);
+  deleteCalendarRefs(task);
   updatePageProperties(task.id, {
     [TASK_FIELDS.status]: selectProperty("done"),
     [TASK_FIELDS.stage]: selectProperty("done"),
@@ -751,16 +926,14 @@ export function cmdArchiveTask(args) {
   const archived = [];
 
   for (const task of tasks) {
-    const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
-    if (eventId) {
-      deleteCalendarEvent(eventId);
-    }
+    const refs = deleteCalendarRefs(task);
     archivePage(task.id);
     archived.push({
       page_id: task.id,
       task: task.title,
-      removed_calendar_event: Boolean(eventId),
-      calendar_event_id: eventId || null
+      removed_calendar_event: refs.length > 0,
+      calendar_event_id: refs[0]?.event_id || null,
+      calendar_event_ids: refs.map((ref) => ref.event_id)
     });
   }
 
@@ -797,10 +970,8 @@ export function cmdDeleteTask(args) {
       throw new Error("delete-task only deletes non-recurring one-time tasks; use remove-schedule for calendar cleanup or pass --allow-recurring explicitly");
     }
 
-    const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
-    if (eventId) {
-      deleteCalendarEvent(eventId);
-    }
+    const refs = deleteCalendarRefs(task);
+    const eventId = refs[0]?.event_id || "";
     if (task.properties[TASK_FIELDS.calendarEventId] || task.properties[TASK_FIELDS.scheduledStart] || task.properties[TASK_FIELDS.scheduledEnd]) {
       const clearedTask = {
         ...task,
@@ -822,8 +993,9 @@ export function cmdDeleteTask(args) {
     const result = {
       page_id: task.id,
       task: task.title,
-      removed_calendar_event: Boolean(eventId),
+      removed_calendar_event: refs.length > 0,
       calendar_event_id: eventId || null,
+      calendar_event_ids: refs.map((ref) => ref.event_id),
       type: task.properties[TASK_FIELDS.type] || null,
       repeat_mode: repeatModeOf(task),
       archived: true
@@ -866,15 +1038,18 @@ export function cmdSetSchedule(args) {
   const task = matchTask(args);
   if (!args.start || !args.end) throw new Error('usage: set-schedule --match "..." --start <ISO> --end <ISO>');
   assertScheduleRange("set-schedule", args.start, args.end, { requireBoth: true });
-  const existingEventId = args["calendar-event-id"] !== undefined
-    ? args["calendar-event-id"]
-    : (task.properties[TASK_FIELDS.calendarEventId] || "");
-  const event = existingEventId
-    ? updateCalendarEvent(existingEventId, task.title, args.start, args.end)
+  const existingRefs = args["calendar-event-id"] !== undefined
+    ? [{ event_id: args["calendar-event-id"], start: args.start, end: args.end }]
+    : calendarRefsOf(task);
+  const reusableRef = existingRefs.length === 1 ? existingRefs[0] : null;
+  if (!reusableRef && existingRefs.length > 1) deleteCalendarRefs(task);
+  const event = reusableRef
+    ? updateCalendarEvent(reusableRef.event_id, task.title, args.start, args.end)
     : createCalendarEvent(task.title, args.start, args.end);
+  const stored = eventStorageForRefs([{ event_id: event.id, start: args.start, end: args.end }]);
   updatePageProperties(task.id, {
-    [TASK_FIELDS.scheduledStart]: dateProperty(args.start),
-    [TASK_FIELDS.scheduledEnd]: dateProperty(args.end),
+    [TASK_FIELDS.scheduledStart]: dateProperty(stored.first?.start || args.start),
+    [TASK_FIELDS.scheduledEnd]: dateProperty(stored.first?.end || args.end),
     [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
     [TASK_FIELDS.schedulingMode]:
       args["scheduling-mode"] !== undefined
@@ -885,12 +1060,12 @@ export function cmdSetSchedule(args) {
     [TASK_FIELDS.scheduleType]: selectProperty(args["schedule-type"] || task.properties[TASK_FIELDS.scheduleType] || "soft"),
     [TASK_FIELDS.status]: selectProperty("scheduled"),
     [TASK_FIELDS.stage]: selectProperty(args.stage || task.properties[TASK_FIELDS.stage] || "planned"),
-    [TASK_FIELDS.calendarEventId]: richTextProperty(event.id)
+    [TASK_FIELDS.calendarEventId]: encodeCalendarRefs(stored.refs)
   });
   const result = {
     ok: true,
     action: "set-schedule",
-    mode: existingEventId ? "updated-existing-event" : "created-new-event",
+    mode: reusableRef ? "updated-existing-event" : "created-new-event",
     page_id: task.id,
     task: task.title,
     start: args.start,
@@ -914,6 +1089,93 @@ export function cmdSetSchedule(args) {
   emitJson(result);
 }
 
+export function cmdSetSeriesSchedule(args) {
+  const task = matchTask(args);
+  const spec = seriesScheduleSpec(task, args);
+  const existingRefs = args["calendar-event-id"] !== undefined
+    ? [{ event_id: args["calendar-event-id"], start: spec.start, end: spec.end }]
+    : calendarRefsOf(task);
+  const reusableRef = existingRefs.length === 1 ? existingRefs[0] : null;
+  if (!reusableRef && existingRefs.length > 1) deleteCalendarRefs(task);
+  const event = reusableRef
+    ? updateCalendarEvent(reusableRef.event_id, task.title, spec.start, spec.end, undefined, { rrules: [spec.rrule] })
+    : createCalendarEvent(task.title, spec.start, spec.end, undefined, { rrules: [spec.rrule] });
+  const stored = eventStorageForRefs([{ event_id: event.id, start: spec.start, end: spec.end }]);
+
+  updatePageProperties(task.id, {
+    [TASK_FIELDS.scheduledStart]: dateProperty(stored.first?.start || spec.start),
+    [TASK_FIELDS.scheduledEnd]: dateProperty(stored.first?.end || spec.end),
+    [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
+    [TASK_FIELDS.schedulingMode]:
+      args["scheduling-mode"] !== undefined
+        ? selectProperty(args["scheduling-mode"])
+        : task.properties[TASK_FIELDS.schedulingMode]
+          ? undefined
+          : selectProperty("hard_time"),
+    [TASK_FIELDS.scheduleType]: selectProperty(args["schedule-type"] || task.properties[TASK_FIELDS.scheduleType] || "hard"),
+    [TASK_FIELDS.status]: selectProperty("scheduled"),
+    [TASK_FIELDS.stage]: selectProperty(args.stage || task.properties[TASK_FIELDS.stage] || "planned"),
+    [TASK_FIELDS.calendarEventId]: encodeCalendarRefs(stored.refs)
+  });
+
+  emitJson({
+    ok: true,
+    action: "set-series-schedule",
+    mode: reusableRef ? "updated-existing-series" : "created-new-series",
+    page_id: task.id,
+    task: task.title,
+    from_date: spec.fromDate,
+    to_date: spec.toDate,
+    weekdays: spec.weekday_names,
+    start: spec.start,
+    end: spec.end,
+    rrule: spec.rrule,
+    calendar_event_id: event.id
+  });
+}
+
+export function cmdSetMultiSchedule(args) {
+  const task = matchTask(args);
+  const slots = multiScheduleSpec(args);
+  deleteCalendarRefs(task);
+  const refs = slots.map((slot) => {
+    const event = createCalendarEvent(task.title, slot.start, slot.end);
+    return {
+      event_id: event.id,
+      start: slot.start,
+      end: slot.end
+    };
+  });
+  const stored = eventStorageForRefs(refs);
+
+  updatePageProperties(task.id, {
+    [TASK_FIELDS.scheduledStart]: dateProperty(stored.first?.start || null),
+    [TASK_FIELDS.scheduledEnd]: dateProperty(stored.first?.end || null),
+    [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
+    [TASK_FIELDS.schedulingMode]:
+      args["scheduling-mode"] !== undefined
+        ? selectProperty(args["scheduling-mode"])
+        : task.properties[TASK_FIELDS.schedulingMode]
+          ? undefined
+          : selectProperty("hard_time"),
+    [TASK_FIELDS.scheduleType]: selectProperty(args["schedule-type"] || task.properties[TASK_FIELDS.scheduleType] || "hard"),
+    [TASK_FIELDS.status]: selectProperty("scheduled"),
+    [TASK_FIELDS.stage]: selectProperty(args.stage || task.properties[TASK_FIELDS.stage] || "planned"),
+    [TASK_FIELDS.calendarEventId]: encodeCalendarRefs(stored.refs)
+  });
+
+  emitJson({
+    ok: true,
+    action: "set-multi-schedule",
+    page_id: task.id,
+    task: task.title,
+    slot_count: stored.refs.length,
+    slots: stored.refs,
+    calendar_event_id: stored.first?.event_id || null,
+    calendar_event_ids: stored.refs.map((ref) => ref.event_id)
+  });
+}
+
 export function cmdRemoveSchedule(args) {
   const query = args.match || args.title || args._.join(" ");
   const shouldAllowMany =
@@ -924,11 +1186,11 @@ export function cmdRemoveSchedule(args) {
   const skipped = [];
 
   for (const task of tasks) {
-    const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+    const refs = calendarRefsOf(task);
     const hadSchedule =
       Boolean(task.properties[TASK_FIELDS.scheduledStart]) ||
       Boolean(task.properties[TASK_FIELDS.scheduledEnd]) ||
-      Boolean(eventId);
+      refs.length > 0;
     if (!hadSchedule && tasks.length > 1) {
       skipped.push({
         page_id: task.id,
@@ -948,7 +1210,7 @@ export function cmdRemoveSchedule(args) {
       }
     };
 
-    if (eventId) deleteCalendarEvent(eventId);
+    deleteCalendarRefs(task);
 
     updatePageProperties(task.id, {
       ...clearCalendarProperties(),
@@ -959,8 +1221,9 @@ export function cmdRemoveSchedule(args) {
     removed.push({
       page_id: task.id,
       task: task.title,
-      removed_calendar_event: Boolean(eventId),
-      calendar_event_id: eventId || null,
+      removed_calendar_event: refs.length > 0,
+      calendar_event_id: refs[0]?.event_id || null,
+      calendar_event_ids: refs.map((ref) => ref.event_id),
       had_schedule: hadSchedule
     });
   }
@@ -1003,14 +1266,17 @@ export function cmdRescheduleTask(args) {
   if (!args.start || !args.end) throw new Error('usage: reschedule-task --match "..." --start <ISO> --end <ISO>');
   assertScheduleRange("reschedule-task", args.start, args.end, { requireBoth: true });
 
-  const existingEventId = task.properties[TASK_FIELDS.calendarEventId] || "";
-  const event = existingEventId
-    ? updateCalendarEvent(existingEventId, task.title, args.start, args.end)
+  const existingRefs = calendarRefsOf(task);
+  const reusableRef = existingRefs.length === 1 ? existingRefs[0] : null;
+  if (!reusableRef && existingRefs.length > 1) deleteCalendarRefs(task);
+  const event = reusableRef
+    ? updateCalendarEvent(reusableRef.event_id, task.title, args.start, args.end)
     : createCalendarEvent(task.title, args.start, args.end);
+  const stored = eventStorageForRefs([{ event_id: event.id, start: args.start, end: args.end }]);
 
   updatePageProperties(task.id, {
-    [TASK_FIELDS.scheduledStart]: dateProperty(args.start),
-    [TASK_FIELDS.scheduledEnd]: dateProperty(args.end),
+    [TASK_FIELDS.scheduledStart]: dateProperty(stored.first?.start || args.start),
+    [TASK_FIELDS.scheduledEnd]: dateProperty(stored.first?.end || args.end),
     [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
     [TASK_FIELDS.schedulingMode]:
       args["scheduling-mode"] !== undefined
@@ -1028,13 +1294,13 @@ export function cmdRescheduleTask(args) {
         [TASK_FIELDS.scheduledEnd]: args.end
       }
     })),
-    [TASK_FIELDS.calendarEventId]: richTextProperty(event.id)
+    [TASK_FIELDS.calendarEventId]: encodeCalendarRefs(stored.refs)
   });
 
   console.log(JSON.stringify({
     ok: true,
     action: "reschedule-task",
-    mode: existingEventId ? "updated-existing-event" : "created-new-event",
+    mode: reusableRef ? "updated-existing-event" : "created-new-event",
     page_id: task.id,
     task: task.title,
     start: args.start,
@@ -1052,7 +1318,11 @@ export function cmdLinkSchedule(args) {
   updatePageProperties(task.id, {
     [TASK_FIELDS.scheduledStart]: dateProperty(args.start),
     [TASK_FIELDS.scheduledEnd]: dateProperty(args.end),
-    [TASK_FIELDS.calendarEventId]: richTextProperty(args["event-id"]),
+    [TASK_FIELDS.calendarEventId]: encodeCalendarRefs([{
+      event_id: args["event-id"],
+      start: args.start,
+      end: args.end
+    }]),
     [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
     [TASK_FIELDS.schedulingMode]:
       args["scheduling-mode"] !== undefined
@@ -1086,7 +1356,7 @@ export function cmdLinkSchedule(args) {
 
 export function cmdUnlinkSchedule(args) {
   const task = matchTask(args);
-  const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
+  const refs = calendarRefsOf(task);
   updatePageProperties(task.id, {
     [TASK_FIELDS.calendarEventId]: richTextProperty("")
   });
@@ -1096,8 +1366,9 @@ export function cmdUnlinkSchedule(args) {
     action: "unlink-schedule",
     page_id: task.id,
     task: task.title,
-    removed_link: Boolean(eventId),
-    previous_calendar_event_id: eventId || null
+    removed_link: refs.length > 0,
+    previous_calendar_event_id: refs[0]?.event_id || null,
+    previous_calendar_event_ids: refs.map((ref) => ref.event_id)
   }, null, 2));
 }
 
@@ -1105,25 +1376,30 @@ export function cmdVerifySchedule(args) {
   const task = matchTask(args);
   const taskStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
   const taskEnd = dateStart(task.properties[TASK_FIELDS.scheduledEnd]);
-  const eventId = task.properties[TASK_FIELDS.calendarEventId] || "";
-
-  let event = null;
-  let lookup = null;
-  if (eventId) {
-    lookup = fetchCalendarEvent(eventId);
-    if (lookup.ok) event = lookup.event || null;
-  }
-
-  const calendarStart = event?.start?.dateTime || event?.start?.date || null;
-  const calendarEnd = event?.end?.dateTime || event?.end?.date || null;
-  const synced =
-    Boolean(eventId) &&
-    Boolean(taskStart) &&
-    Boolean(taskEnd) &&
-    Boolean(event) &&
-    event.status !== "cancelled" &&
-    normalizedInstant(taskStart) === normalizedInstant(calendarStart) &&
-    normalizedInstant(taskEnd) === normalizedInstant(calendarEnd);
+  const refs = calendarRefsOf(task);
+  const checks = refs.map((ref) => {
+    const lookup = fetchCalendarEvent(ref.event_id);
+    const event = lookup.ok ? (lookup.event || null) : null;
+    const calendarStart = event?.start?.dateTime || event?.start?.date || null;
+    const calendarEnd = event?.end?.dateTime || event?.end?.date || null;
+    return {
+      event_id: ref.event_id,
+      task_start: ref.start || taskStart,
+      task_end: ref.end || taskEnd,
+      calendar_start: calendarStart,
+      calendar_end: calendarEnd,
+      calendar_status: event?.status || null,
+      lookup_ok: lookup.ok === true,
+      not_found: Boolean(lookup.notFound),
+      synced:
+        Boolean(event) &&
+        event.status !== "cancelled" &&
+        normalizedInstant(ref.start || taskStart) === normalizedInstant(calendarStart) &&
+        normalizedInstant(ref.end || taskEnd) === normalizedInstant(calendarEnd)
+    };
+  });
+  const first = checks[0] || null;
+  const synced = refs.length > 0 && checks.every((check) => check.synced);
 
   emitJson({
     ok: true,
@@ -1131,18 +1407,20 @@ export function cmdVerifySchedule(args) {
     page_id: task.id,
     task: task.title,
     synced,
-    calendar_event_id: eventId || null,
+    calendar_event_id: first?.event_id || null,
+    calendar_event_ids: refs.map((ref) => ref.event_id),
     task_schedule: {
       start: taskStart,
       end: taskEnd
     },
     calendar_schedule: {
-      start: calendarStart,
-      end: calendarEnd
+      start: first?.calendar_start || null,
+      end: first?.calendar_end || null
     },
-    calendar_status: event?.status || null,
-    lookup_ok: lookup ? lookup.ok === true : null,
-    not_found: lookup ? Boolean(lookup.notFound) : false
+    calendar_status: first?.calendar_status || null,
+    lookup_ok: first ? first.lookup_ok : null,
+    not_found: first ? first.not_found : false,
+    checks
   });
 }
 
