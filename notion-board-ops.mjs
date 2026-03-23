@@ -208,7 +208,7 @@ ${lines.join("\n")}`);
   process.exit(exitCode);
 }
 
-function main() {
+async function main() {
   const [command, ...rest] = process.argv.slice(2);
   if (!command || command === "help" || command === "--help" || command === "-h") {
     printHelp(0);
@@ -219,7 +219,7 @@ function main() {
   if (!spec) printHelp(1);
 
   try {
-    spec.run(args);
+    await spec.run(args);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(message);
@@ -227,4 +227,4 @@ function main() {
   }
 }
 
-main();
+await main();

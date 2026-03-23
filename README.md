@@ -70,6 +70,12 @@ Refresh the root, daily, and weekly Notion dashboard navigation blocks from the 
 npm run sync:dashboards
 ```
 
+Refresh the live OpenClaw cron job definitions from the repo-managed source:
+
+```bash
+npm run sync:crons
+```
+
 Do both in one pass:
 
 ```bash
@@ -198,8 +204,11 @@ This lets active tasks disappear from Notion views while still preserving a dura
 - `reconcile-calendar` validates Notion-side state and also checks referenced Google Calendar events directly through `gog`.
 - `evening-summary` renders the short Telegram-style nightly check-in directly from board state instead of relying on freeform agent wording.
 - Add `@auto-done` to a task's `Review Notes` when a scheduled block should count as completed automatically during `close-day` without being asked again in the evening review.
+- `@no-check` is also treated as an auto-done marker for scheduled tasks that should not be re-confirmed manually.
 - `sync:dashboards` refreshes the root/daily/weekly page navigation from `LIFESTYLE_BOARD.json`, and also replaces the root menu's nested Today/This Week/This Month/This Year memo blocks with live task lists.
-- `sync:all` is the practical "make the live system match the repo" command for wrapper code plus dashboard shells.
+- `sync:crons` pushes the repo-managed cron prompts/schedules into the live OpenClaw scheduler.
+- `smoke:cron -- --name "Daily overview with OpenClaw"` runs a named cron immediately and prints its latest persisted run history.
+- `sync:all` is the practical "make the live system match the repo" command for wrapper code, dashboard shells, and cron definitions.
 - The CLI assumes your board uses task properties similar to:
   - `Task Name`
   - `Stage`

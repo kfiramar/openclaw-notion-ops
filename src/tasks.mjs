@@ -122,8 +122,11 @@ export function isAutoCompleteWhenScheduledTask(task) {
   const notes = normalize(reviewNotesOf(task));
   return (
     notes.includes("@auto-done") ||
+    notes.includes("@autodone") ||
     notes.includes("@auto-done-scheduled") ||
     notes.includes("@auto-complete-scheduled") ||
+    notes.includes("@no-check") ||
+    notes.includes("no check needed") ||
     notes.includes("auto done when scheduled")
   );
 }

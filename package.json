@@ -10,12 +10,14 @@
   "scripts": {
     "help": "node ./notion-board-ops.mjs",
     "sync:openclaw": "node ./scripts/sync-to-openclaw.mjs",
+    "sync:crons": "node ./scripts/sync-openclaw-crons.mjs",
     "sync:dashboards": "node ./scripts/sync-dashboards.mjs",
-    "sync:all": "npm run sync:openclaw && npm run sync:dashboards",
+    "sync:all": "npm run sync:openclaw && npm run sync:dashboards && npm run sync:crons",
     "check:dashboards": "node ./scripts/check-dashboards.mjs",
     "audit:notion-ux": "node ./scripts/audit-notion-first-ux.mjs",
     "check:openclaw": "node ./scripts/sync-to-openclaw.mjs --check",
-    "diff:openclaw": "bash ./scripts/diff-live.sh"
+    "diff:openclaw": "bash ./scripts/diff-live.sh",
+    "smoke:cron": "node ./scripts/smoke-cron-job.mjs"
   },
   "engines": {
     "node": ">=18"

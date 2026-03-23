@@ -2,6 +2,7 @@ import { TASK_FIELDS } from "./config.mjs";
 import { createCalendarEvent, deleteCalendarEvent, fetchCalendarEvent, fetchCalendarEventsInRange } from "./calendar.mjs";
 import { dateStart, logCompletion, readCompletions } from "./history.mjs";
 import { archivePage, getPage, updatePageProperties } from "./notion.mjs";
+import { loadSchedulingPreferenceMap, sortDatesByPreference, windowsForDate } from "./openviking.mjs";
 import {
   calendarRefsOf,
   carryForwardProperties,
@@ -165,10 +166,13 @@ function weekdayAllowed(task, date) {
   return repeatDays.includes(weekdayName(date));
 }
 
-function candidateWindowsForDate(task, date) {
+function candidateWindowsForDate(task, date, preference = null) {
   const mode = task.properties[TASK_FIELDS.schedulingMode] || null;
   if (!weekdayAllowed(task, date)) return [];
   if (mode === "hard_time" || mode === "routine_window" || mode === "list_only") return [];
+
+  const preferredWindows = windowsForDate(preference, date);
+  if (preferredWindows.length > 0) return preferredWindows;
 
   const day = new Date(`${date}T12:00:00Z`).getUTCDay();
   if (day === 5) return [[10 * 60, 13 * 60], [16 * 60, 19 * 60]];
@@ -708,12 +712,12 @@ function candidateNeedCount(candidate) {
   return 1;
 }
 
-function flexibleSlotsForTask(task, validDates, occupiedByDate, count) {
+function flexibleSlotsForTask(task, validDates, occupiedByDate, count, preference = null) {
   const slots = [];
   const durationMinutes = Math.max(15, taskDuration(task));
-  for (const day of validDates) {
+  for (const day of sortDatesByPreference(validDates, preference)) {
     if (slots.length >= count) break;
-    const windows = candidateWindowsForDate(task, day);
+    const windows = candidateWindowsForDate(task, day, preference);
     if (windows.length === 0) continue;
     const occupied = occupiedByDate.get(day) || [];
     const slot = findOpenSlot(occupied, windows, durationMinutes);
@@ -775,7 +779,7 @@ function candidateScore(candidate, date) {
   return score;
 }
 
-export function cmdEveningSummary(args) {
+export async function cmdEveningSummary(args) {
   const date = normalizeDateArg(args.date);
   const days = Math.max(1, Number(args.days || 3));
   const taskLimit = Math.max(1, Number(args["task-limit"] || 3));
@@ -888,14 +892,19 @@ export function cmdEveningSummary(args) {
     if (!byId.has(item.id)) byId.set(item.id, { ...item, kind: "flexible" });
   }
 
-  const occupiedByDate = buildOccupiedByDate(activeTasks, datesInclusive(decisionsDate, addDays(date, days)));
   const scheduleCandidates = Array.from(byId.values())
     .filter((item) => includeInHumanSummary(item))
     .sort((a, b) => candidateScore(b, decisionsDate) - candidateScore(a, decisionsDate))
     .slice(0, taskLimit);
+  const occupiedByDate = buildOccupiedByDate(activeTasks, datesInclusive(decisionsDate, addDays(date, days)));
+  const scheduleCandidateTasks = scheduleCandidates.map((candidate) => getPage(candidate.id));
+  const preferencesByTaskId = await loadSchedulingPreferenceMap(scheduleCandidateTasks, compactTaskLabel);
 
   for (const candidate of scheduleCandidates) {
-    const task = getPage(candidate.id);
+    const task =
+      scheduleCandidateTasks.find((value) => value.id === candidate.id) ||
+      getPage(candidate.id);
+    const preference = preferencesByTaskId.get(task.id) || null;
     const validDates =
       candidate.valid_dates && candidate.valid_dates.length > 0
         ? candidate.valid_dates
@@ -907,7 +916,7 @@ export function cmdEveningSummary(args) {
     const slots =
       task.properties[TASK_FIELDS.schedulingMode] === "hard_time"
         ? hardTimeSlotsForTask(task, validDates, occupiedByDate, neededCount)
-        : flexibleSlotsForTask(task, validDates, occupiedByDate, neededCount);
+        : flexibleSlotsForTask(task, validDates, occupiedByDate, neededCount, preference);
     if (slots.length === 0) continue;
     scheduling.push({
       label: compactTaskLabel(task),
@@ -1620,7 +1629,7 @@ export function cmdPlanWeek(args) {
   }, null, 2));
 }
 
-export function cmdSchedulingDecisions(args) {
+export async function cmdSchedulingDecisions(args) {
   const date = normalizeDateArg(args.date);
   const days = Math.max(1, Number(args.days || 3));
   const limit = Math.max(1, Number(args.limit || 12));
@@ -1634,6 +1643,11 @@ export function cmdSchedulingDecisions(args) {
     .filter((task) => inSchedulingDecisionWindow(task, date, windowEnd, days))
     .sort((a, b) => comparePlannedTasks(a, b, date))
     .slice(0, limit);
+  const preferencesByTaskId = await loadSchedulingPreferenceMap(tasks, compactTaskLabel);
+  const occupiedByDate = buildOccupiedByDate(
+    resolveTaskRows(args).filter((task) => isActiveTask(task) && task.properties[TASK_FIELDS.stage] !== "blocked"),
+    dateWindow
+  );
 
   const hardTimeReady = [];
   const hardTimeOrWindow = [];
@@ -1649,6 +1663,7 @@ export function cmdSchedulingDecisions(args) {
     }
 
     const mode = task.properties[TASK_FIELDS.schedulingMode] || "flexible_block";
+    const preference = preferencesByTaskId.get(task.id) || null;
     if (mode === "hard_time") {
       const proposal = hardTimeProposal(task, dateWindow, date);
       if (proposal) {
@@ -1667,7 +1682,15 @@ export function cmdSchedulingDecisions(args) {
       hardTimeOrWindow.push(schedulingDecisionShape(task, date, "routine-window-needs-clear-window"));
       continue;
     }
-    flexibleToDiscuss.push(schedulingDecisionShape(task, date, "flexible-needs-conversational-scheduling"));
+    const preferenceSlots = flexibleSlotsForTask(task, dateWindow, occupiedByDate, 2, preference).map((slot) => ({
+      start: slot.start,
+      end: slot.end
+    }));
+    flexibleToDiscuss.push({
+      ...schedulingDecisionShape(task, date, "flexible-needs-conversational-scheduling"),
+      preferred_slots: preferenceSlots,
+      preference_summary: preference?.summary || null
+    });
   }
 
   console.log(JSON.stringify({
