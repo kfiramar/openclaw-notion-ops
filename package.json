@@ -17,12 +17,16 @@
     "audit:notion-ux": "node ./scripts/audit-notion-first-ux.mjs",
     "check:openclaw": "node ./scripts/sync-to-openclaw.mjs --check",
     "diff:openclaw": "bash ./scripts/diff-live.sh",
+    "patch:telegram-poll-hook": "node ./scripts/patch-openclaw-telegram-poll-hook.mjs",
     "smoke:cron": "node ./scripts/smoke-cron-job.mjs",
     "smoke:morning": "node ./scripts/smoke-morning-cron.mjs",
     "smoke:evening": "node ./scripts/smoke-evening-cron.mjs",
     "smoke:weekly": "node ./scripts/smoke-weekly-cron.mjs",
     "smoke:monthly": "node ./scripts/smoke-monthly-cron.mjs",
-    "smoke:yearly": "node ./scripts/smoke-yearly-cron.mjs"
+    "smoke:yearly": "node ./scripts/smoke-yearly-cron.mjs",
+    "smoke:eod-poll-build": "node ./scripts/smoke-eod-poll-build.mjs",
+    "smoke:eod-poll-dry-run": "node ./scripts/smoke-eod-poll-dry-run.mjs",
+    "smoke:eod-poll-process-preview": "node ./scripts/smoke-eod-poll-process-preview.mjs"
   },
   "engines": {
     "node": ">=18"

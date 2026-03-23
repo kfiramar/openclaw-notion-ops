@@ -15,6 +15,9 @@ export const OPENCLAW_CONTAINER_ROOT =
 export const BOARD_PATH = process.env.BOARD_PATH || path.join(CWD, "board.json");
 export const HISTORY_ROOT = process.env.HISTORY_ROOT || path.join(CWD, "history");
 export const COMPLETIONS_ROOT = path.join(HISTORY_ROOT, "completions");
+export const POLL_STATE_ROOT = path.join(HISTORY_ROOT, "polls");
+export const TELEGRAM_POLL_ACCOUNT = process.env.OPENCLAW_TELEGRAM_ACCOUNT || "bot4";
+export const TELEGRAM_POLL_TARGET = process.env.OPENCLAW_TELEGRAM_TO || "492482728";
 export const DISABLE_BACKGROUND_SYNC = /^(1|true|yes)$/i.test(
   String(process.env.NOTION_OPS_DISABLE_BACKGROUND_SYNC || "")
 );

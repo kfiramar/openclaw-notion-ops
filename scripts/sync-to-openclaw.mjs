@@ -75,6 +75,9 @@ export const OPENCLAW_CONTAINER_ROOT = ${JSON.stringify(openclawContainerRoot)};
 export const BOARD_PATH = ${JSON.stringify(targetBoardInContainer)};
 export const HISTORY_ROOT = ${JSON.stringify(targetHistoryInContainer)};
 export const COMPLETIONS_ROOT = \`\${HISTORY_ROOT}/completions\`;
+export const POLL_STATE_ROOT = \`\${HISTORY_ROOT}/polls\`;
+export const TELEGRAM_POLL_ACCOUNT = ${JSON.stringify(process.env.OPENCLAW_TELEGRAM_ACCOUNT || "bot4")};
+export const TELEGRAM_POLL_TARGET = ${JSON.stringify(process.env.OPENCLAW_TELEGRAM_TO || "492482728")};
 export const DISABLE_BACKGROUND_SYNC = /^(1|true|yes)$/i.test(
   String(process.env.NOTION_OPS_DISABLE_BACKGROUND_SYNC || "")
 );

@@ -48,6 +48,26 @@ const JOBS = [
       "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs close-day --date today` first. Then run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs evening-summary --date today --days 3 --task-limit 4`. Send Kfir exactly the stdout from the `evening-summary` command and nothing else. Do not add any greeting, intro, explanation, summary line, or formatting changes. If the command fails, report the real failure briefly instead of improvising."
   },
   {
+    name: "Lifestyle daily completion poll",
+    description: "Nightly Telegram completion poll for today's Lifestyle tasks",
+    schedule: { kind: "cron", value: "35 21 * * *", tz: "Asia/Jerusalem" },
+    delivery: { mode: "none" },
+    timeoutSeconds: 180,
+    thinking: "low",
+    message:
+      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs send-eod-poll --date today --close-after-seconds 60 --expire-after-seconds 43200`. Do not send any extra user-facing message from the agent. The command itself handles Telegram delivery when there are tasks that need confirmation."
+  },
+  {
+    name: "Lifestyle daily completion poll watcher",
+    description: "Minute-based watcher that closes and applies nightly Telegram completion polls",
+    schedule: { kind: "every", value: "1m" },
+    delivery: { mode: "none" },
+    timeoutSeconds: 120,
+    thinking: "low",
+    message:
+      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs process-eod-polls --carry-to this week`. Do not send any user-facing message unless the command reports a real system failure that needs escalation."
+  },
+  {
     name: "Weekly overview with OpenClaw",
     description: "Saturday user-facing weekly overview and next-week planning for the Lifestyle system",
     schedule: { kind: "cron", value: "0 9 * * 6", tz: "Asia/Jerusalem" },

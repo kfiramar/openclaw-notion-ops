@@ -21,6 +21,10 @@ For your current machine, the intended model is:
 - provides higher-level maintenance commands like:
   - `close-day`
   - `evening-summary`
+  - `list-eod-poll-candidates`
+  - `build-eod-poll`
+  - `send-eod-poll`
+  - `process-eod-polls`
   - `show-completed`
   - `triage-inbox`
   - `scheduling-decisions`
@@ -176,6 +180,12 @@ Maintenance commands:
 - `show-completed [--date today|YYYY-MM-DD]`
 - `evening-summary [--date today|YYYY-MM-DD] [--days N] [--task-limit N]`
 - `close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]`
+- `list-eod-poll-candidates [--date today|YYYY-MM-DD]`
+- `build-eod-poll [--date today|YYYY-MM-DD]`
+- `send-eod-poll [--date today|YYYY-MM-DD] [--account bot4] [--target 492482728] [--close-after-seconds 60] [--expire-after-seconds 43200] [--dry-run]`
+- `process-eod-polls [--batch-id <BATCH_ID>] [--carry-to this week] [--now ISO]`
+- `process-eod-polls [--batch-id <BATCH_ID>] [--carry-to this week] [--now ISO] [--no-apply]`
+- `apply-eod-poll-results [--date today|YYYY-MM-DD] [--selected-page-ids <ID,ID>] [--unselected-page-ids <ID,ID>] [--carry-to this week]`
 - `triage-inbox [--date YYYY-MM-DD] [--limit N] [--apply]`
 - `review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]`
 - `scheduling-decisions [--date today|tomorrow|YYYY-MM-DD] [--days N] [--limit N]`
@@ -207,6 +217,10 @@ This lets active tasks disappear from Notion views while still preserving a dura
 - `@no-check` is also treated as an auto-done marker for scheduled tasks that should not be re-confirmed manually.
 - `sync:dashboards` refreshes the root/daily/weekly page navigation from `LIFESTYLE_BOARD.json`, and also replaces the root menu's nested Today/This Week/This Month/This Year memo blocks with live task lists.
 - `sync:crons` pushes the repo-managed cron prompts/schedules into the live OpenClaw scheduler.
+- `send-eod-poll` creates one or more Telegram-native multi-select polls for confirmable `today` tasks and persists poll state under `history/polls`.
+- `process-eod-polls` consumes persisted Telegram poll answers, closes due polls, and applies selected vs unselected task outcomes back into the wrapper.
+- `process-eod-polls --no-apply` is the safe preview path for verifying poll-answer ingestion and selected-vs-unselected mapping without mutating tasks.
+- end-of-day poll answer ingestion currently depends on the live OpenClaw Telegram runtime hook added by `npm run patch:telegram-poll-hook`.
 - `smoke:cron -- --name "Daily overview with OpenClaw"` runs a named cron immediately and prints its latest persisted run history.
 - dedicated cron smoke commands are available for the main user-facing surfaces:
   - `npm run smoke:morning`
@@ -214,6 +228,11 @@ This lets active tasks disappear from Notion views while still preserving a dura
   - `npm run smoke:weekly`
   - `npm run smoke:monthly`
   - `npm run smoke:yearly`
+- manual end-of-day poll smoke helpers are available:
+  - `npm run smoke:eod-poll-build`
+  - `npm run smoke:eod-poll-dry-run`
+  - `npm run smoke:eod-poll-process-preview`
+- `CRON_REVIEW.md` documents the current live cron set, why each job exists, and the main remaining runtime risk.
 - `sync:all` is the practical "make the live system match the repo" command for wrapper code, dashboard shells, and cron definitions.
 - The CLI assumes your board uses task properties similar to:
   - `Task Name`

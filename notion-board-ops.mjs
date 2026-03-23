@@ -28,6 +28,13 @@ import {
   cmdVerifySchedule
 } from "./src/commands.mjs";
 import {
+  cmdApplyEodPollResults,
+  cmdBuildEodPoll,
+  cmdListEodPollCandidates,
+  cmdProcessEodPolls,
+  cmdSendEodPoll
+} from "./src/eod-poll.mjs";
+import {
   cmdCloseDay,
   cmdEveningSummary,
   cmdRefreshManualRepeat,
@@ -52,6 +59,26 @@ const COMMANDS = {
   "show-completed": {
     help: "show-completed [--date today|YYYY-MM-DD]",
     run: cmdShowCompleted
+  },
+  "list-eod-poll-candidates": {
+    help: "list-eod-poll-candidates [--date today|YYYY-MM-DD]",
+    run: cmdListEodPollCandidates
+  },
+  "build-eod-poll": {
+    help: "build-eod-poll [--date today|YYYY-MM-DD]",
+    run: cmdBuildEodPoll
+  },
+  "send-eod-poll": {
+    help: "send-eod-poll [--date today|YYYY-MM-DD] [--account bot4] [--target 492482728] [--close-after-seconds 60] [--expire-after-seconds 43200] [--dry-run]",
+    run: cmdSendEodPoll
+  },
+  "process-eod-polls": {
+    help: "process-eod-polls [--batch-id <BATCH_ID>] [--carry-to this week] [--now ISO] [--no-apply]",
+    run: cmdProcessEodPolls
+  },
+  "apply-eod-poll-results": {
+    help: "apply-eod-poll-results [--date today|YYYY-MM-DD] [--selected-page-ids <ID,ID>] [--unselected-page-ids <ID,ID>] [--carry-to this week]",
+    run: cmdApplyEodPollResults
   },
   "evening-summary": {
     help: "evening-summary [--date today|YYYY-MM-DD] [--days N] [--task-limit N]",
