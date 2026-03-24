@@ -295,6 +295,45 @@ function taskReviewShape(task) {
   };
 }
 
+function shortWeekday(date) {
+  return new Intl.DateTimeFormat("en-US", { weekday: "short", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`));
+}
+
+function hhmm(totalMinutes) {
+  const hours = String(Math.floor(totalMinutes / 60)).padStart(2, "0");
+  const minutes = String(totalMinutes % 60).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+function formatIsoRange(startIso, endIso, baseDate = null) {
+  if (!startIso || !endIso) return null;
+  const start = localParts(startIso);
+  const end = localParts(endIso);
+  const range = `${hhmm(start.minutes)}-${hhmm(end.minutes)}`;
+  return start.date === baseDate || baseDate === null
+    ? range
+    : `${shortWeekday(start.date)} ${range}`;
+}
+
+function compareDayEntries(a, b, date) {
+  const aDue = dateStart(a.properties?.[TASK_FIELDS.dueDate]) || a.due_date || "9999-12-31";
+  const bDue = dateStart(b.properties?.[TASK_FIELDS.dueDate]) || b.due_date || "9999-12-31";
+  if (aDue !== bDue) return aDue.localeCompare(bDue);
+
+  const aPriority = priorityWeight(a.properties?.[TASK_FIELDS.priority] || a.priority || null);
+  const bPriority = priorityWeight(b.properties?.[TASK_FIELDS.priority] || b.priority || null);
+  if (aPriority !== bPriority) return bPriority - aPriority;
+
+  const aHorizon = a.properties?.[TASK_FIELDS.horizon] || a.horizon || "";
+  const bHorizon = b.properties?.[TASK_FIELDS.horizon] || b.horizon || "";
+  if (aHorizon !== bHorizon) {
+    const order = new Map([["today", 0], ["this week", 1], ["this month", 2], ["this year", 3], ["", 4]]);
+    return (order.get(aHorizon) ?? 9) - (order.get(bHorizon) ?? 9);
+  }
+
+  return String(a.title || "").localeCompare(String(b.title || ""));
+}
+
 function inSchedulingDecisionWindow(task, date, windowEnd, days) {
   const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
   const horizon = task.properties[TASK_FIELDS.horizon];
@@ -353,6 +392,15 @@ function weeklyRepeatPressure(task, date) {
     valid_dates: unscheduledValidDates,
     urgency,
     explanation
+  };
+}
+
+function weeklyOptionShape(task, date) {
+  const repeatPressure = weeklyRepeatPressure(task, date);
+  if (repeatPressure) return repeatPressure;
+  return {
+    ...taskReviewShape(task),
+    due_in_days: null
   };
 }
 
@@ -739,22 +787,7 @@ export async function cmdEveningSummary(args) {
     (label) => label.toLowerCase()
   );
 
-  const scheduledCarryLabels =
-    completedLabels.length > 0
-      ? []
-      : uniqueBy(
-          activeTasks
-            .filter((task) => task.properties[TASK_FIELDS.status] === "scheduled")
-            .filter((task) => {
-              const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
-              return Boolean(scheduledStart) && scheduledStart.slice(0, 10) <= date;
-            })
-            .filter((task) => task.properties[TASK_FIELDS.horizon] !== "today")
-            .map((task) => compactTaskLabel(task)),
-          (label) => label.toLowerCase()
-        );
-
-  const doneToday = completedLabels.length > 0 ? completedLabels : scheduledCarryLabels;
+  const doneToday = completedLabels;
 
   const openToday = activeTasks.filter((task) => task.properties[TASK_FIELDS.horizon] === "today");
   const overdue = activeTasks.filter((task) => {
@@ -1515,6 +1548,161 @@ export function cmdPlanDay(args) {
       "schedule suggestions are heuristic blocks only and do not inspect Google Calendar availability"
     ]
   }, null, 2));
+}
+
+export async function cmdTomorrowPlan(args) {
+  const date = normalizeDateArg(args.date || "tomorrow");
+  const days = Math.max(1, Number(args.days || 5));
+  const limit = Math.max(1, Number(args.limit || 20));
+  const windowEnd = addDays(date, days - 1);
+  const tasks = resolveTaskRows(args)
+    .filter((task) => isActiveTask(task) && task.properties[TASK_FIELDS.stage] !== "blocked");
+  const scheduledTomorrow = tasks
+    .filter((task) => scheduledTouchesDate(task, date))
+    .sort((a, b) => comparePlannedTasks(a, b, date));
+
+  const unscheduledCalendarTasks = tasks
+    .filter((task) => inferNeedsCalendar(task))
+    .filter((task) => !hasCalendarFields(task))
+    .filter((task) => (task.properties[TASK_FIELDS.schedulingMode] || null) !== "list_only")
+    .filter((task) => inSchedulingDecisionWindow(task, date, windowEnd, days))
+    .sort((a, b) => comparePlannedTasks(a, b, date))
+    .slice(0, limit);
+
+  const dateWindow = Array.from({ length: days }, (_, index) => addDays(date, index));
+  const preferencesByTaskId = await loadSchedulingPreferenceMap(unscheduledCalendarTasks, compactTaskLabel);
+  const occupiedByDate = buildOccupiedByDate(tasks, dateWindow);
+
+  const hardTimeOrWindow = [];
+  const flexibleToDiscuss = [];
+  const weeklyRepeatMandatory = [];
+  for (const task of unscheduledCalendarTasks) {
+    const repeatPressure = weeklyRepeatPressure(task, date);
+    if (repeatPressure) {
+      if (repeatPressure.urgency === "mandatory_now") weeklyRepeatMandatory.push(repeatPressure);
+    }
+
+    const mode = task.properties[TASK_FIELDS.schedulingMode] || "flexible_block";
+    const preference = preferencesByTaskId.get(task.id) || null;
+    if (mode === "hard_time") {
+      hardTimeOrWindow.push(schedulingDecisionShape(task, date, "hard-time-needs-clear-time"));
+      continue;
+    }
+    if (mode === "routine_window") {
+      hardTimeOrWindow.push(schedulingDecisionShape(task, date, "routine-window-needs-clear-window"));
+      continue;
+    }
+    const preferenceSlots = flexibleSlotsForTask(task, dateWindow, occupiedByDate, 2, preference).map((slot) => ({
+      start: slot.start,
+      end: slot.end
+    }));
+    flexibleToDiscuss.push({
+      ...schedulingDecisionShape(task, date, "flexible-needs-conversational-scheduling"),
+      preferred_slots: preferenceSlots,
+      preference_summary: preference?.summary || null
+    });
+  }
+
+  const listOnlyTomorrow = tasks
+    .filter((task) => !inferNeedsCalendar(task))
+    .filter((task) => !scheduledTouchesDate(task, date))
+    .filter((task) => {
+      const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
+      return task.properties[TASK_FIELDS.horizon] === "today" || dueDate === date;
+    })
+    .sort((a, b) => comparePlannedTasks(a, b, date));
+
+  const rescheduleTomorrow = uniqueBy([
+    ...flexibleToDiscuss.filter((task) => Number(task.due_in_days) <= 0),
+    ...hardTimeOrWindow.filter((task) => {
+      if (Number(task.due_in_days) > 0) return false;
+      if (task.reason === "hard-time-needs-clear-time" && Number(task.due_in_days) < 0) return false;
+      return true;
+    }),
+    ...weeklyRepeatMandatory,
+    ...listOnlyTomorrow.map((task) => ({
+      ...taskReviewShape(task),
+      due_date: dateStart(task.properties[TASK_FIELDS.dueDate]),
+      due_in_days: dateStart(task.properties[TASK_FIELDS.dueDate]) === date ? 0 : null,
+      reason: "list-only-tomorrow"
+    }))
+  ], (row) => row.id).sort((a, b) => compareDayEntries(a, b, date));
+
+  const rescheduleIds = new Set(rescheduleTomorrow.map((row) => row.id));
+  const scheduledTomorrowIds = new Set(scheduledTomorrow.map((task) => task.id));
+
+  const weeklyOptionTasks = tasks
+    .filter((task) => task.properties[TASK_FIELDS.horizon] === "this week")
+    .filter((task) => !rescheduleIds.has(task.id))
+    .filter((task) => !scheduledTomorrowIds.has(task.id))
+    .filter((task) => {
+      const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
+      if (dueDate && dueDate <= date) return false;
+      const repeatPressure = weeklyRepeatPressure(task, date);
+      if (repeatPressure?.urgency === "mandatory_now") return false;
+      if (repeatPressure?.urgency === "optional_this_week") return true;
+      return !hasCalendarFields(task);
+    })
+    .map((task) => weeklyOptionShape(task, date));
+
+  const optionalThisWeek = uniqueBy(weeklyOptionTasks, (row) => row.id)
+    .sort((a, b) => compareDayEntries(a, b, date));
+
+  function formatBullet(row, section) {
+    const label = row.title;
+    const dueDate = row.due_date || null;
+    const parts = [];
+
+    if (section === "scheduled") {
+      const time = formatIsoRange(row.properties?.[TASK_FIELDS.scheduledStart], row.properties?.[TASK_FIELDS.scheduledEnd], date);
+      return time
+        ? `• **${label}** — ${time}`
+        : `• **${label}**`;
+    }
+
+    if (section === "reschedule") {
+      if (row.reason === "hard-time-needs-clear-time") {
+        parts.push("needs a new exact time");
+      } else if (row.reason === "routine-window-needs-clear-window") {
+        parts.push("needs a clear time window");
+      } else if (row.reason === "list-only-tomorrow") {
+        parts.push(dueDate === date ? "due tomorrow" : "carry from today");
+      } else if (dueDate && dueDate < date) {
+        parts.push("overdue");
+      } else if (dueDate === date) {
+        parts.push("due tomorrow");
+      }
+      const slot = Array.isArray(row.preferred_slots) && row.preferred_slots.length > 0
+        ? formatIsoRange(row.preferred_slots[0].start, row.preferred_slots[0].end, date)
+        : null;
+      if (slot) parts.push(`suggested ${slot}`);
+      return `• **${label}**${parts.length > 0 ? ` — ${parts.join("; ")}` : ""}`;
+    }
+
+    if (section === "week") {
+      const goal = Number(row.missing_needed || 0);
+      if (goal > 0) return `• **${label}** (goal ${goal})`;
+      return `• **${label}**`;
+    }
+
+    return `• **${label}**`;
+  }
+
+  const lines = ["Tomorrow"];
+  if (rescheduleTomorrow.length > 0) {
+    lines.push("", "Reschedule tomorrow:");
+    for (const row of rescheduleTomorrow) lines.push(formatBullet(row, "reschedule"));
+  }
+  if (scheduledTomorrow.length > 0) {
+    lines.push("", "Already scheduled:");
+    for (const task of scheduledTomorrow) lines.push(formatBullet(task, "scheduled"));
+  }
+  if (optionalThisWeek.length > 0) {
+    lines.push("", "Could pick from this week:");
+    for (const row of optionalThisWeek) lines.push(formatBullet(row, "week"));
+  }
+
+  console.log(lines.join("\n").trim());
 }
 
 export function cmdPlanWeek(args) {

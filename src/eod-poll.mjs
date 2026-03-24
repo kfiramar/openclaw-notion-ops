@@ -13,7 +13,7 @@ import {
   readPollState,
   writePollState
 } from "./polls.mjs";
-import { sendTelegramPoll, stopTelegramPoll } from "./telegram.mjs";
+import { sendTelegramMessage, sendTelegramPoll, stopTelegramPoll } from "./telegram.mjs";
 import {
   calendarRefsOf,
   carryForwardProperties,
@@ -25,9 +25,10 @@ import {
   mirrorRows,
   plusCadence,
   priorityWeight,
-  repeatModeOf
+  repeatModeOf,
+  scheduledTouchesDate
 } from "./tasks.mjs";
-import { dateProperty, normalizeDateArg, numberProperty, selectProperty } from "./util.mjs";
+import { dateProperty, normalizeDateArg, numberProperty, selectProperty, sleep } from "./util.mjs";
 
 function emitJson(payload) {
   console.log(JSON.stringify(payload, null, 2));
@@ -72,14 +73,22 @@ function disambiguateLabels(rows) {
   return labels;
 }
 
+function isEodRelevantTask(task, date) {
+  if (task.archived === true) return false;
+  if (!isActiveTask(task)) return false;
+  if (task.properties[TASK_FIELDS.stage] === "blocked") return false;
+  if (!includeInHumanSummary(task)) return false;
+  if (isAutoCompleteWhenScheduledTask(task)) return false;
+
+  const horizon = task.properties[TASK_FIELDS.horizon];
+  if (horizon === "today") return true;
+  if (scheduledTouchesDate(task, date)) return true;
+  return false;
+}
+
 export function eodPollCandidates(date) {
   return mirrorRows("tasks")
-    .filter((task) => task.archived !== true)
-    .filter((task) => isActiveTask(task))
-    .filter((task) => task.properties[TASK_FIELDS.horizon] === "today")
-    .filter((task) => task.properties[TASK_FIELDS.stage] !== "blocked")
-    .filter((task) => includeInHumanSummary(task))
-    .filter((task) => !isAutoCompleteWhenScheduledTask(task))
+    .filter((task) => isEodRelevantTask(task, date))
     .sort(compareCandidates);
 }
 
@@ -133,6 +142,13 @@ function parseSeconds(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+function parseWatchSeconds(value, fallback = 180) {
+  if (value === undefined || value === null || value === false) return 0;
+  if (value === true || value === "true" || value === "yes") return fallback;
+  if (value === "false" || value === "no" || value === "0") return 0;
+  return parseSeconds(value, fallback);
+}
+
 function earliestEvent(events) {
   return [...events]
     .filter((row) => row.recorded_at)
@@ -163,6 +179,100 @@ function buildApplySummary(state, selectedIndexes) {
     selected_labels: selectedOptions.map((option) => option.label),
     unselected_labels: unselectedOptions.map((option) => option.label)
   };
+}
+
+function eodFollowUpText(state) {
+  const done = Array.isArray(state.selected_labels) ? state.selected_labels : [];
+  const missed = Array.isArray(state.unselected_labels) ? state.unselected_labels : [];
+  const lines = [];
+
+  if (done.length > 0) {
+    lines.push("Recorded from your poll:", "");
+    for (const label of done) {
+      lines.push(`• ${label}`);
+    }
+  }
+
+  if (missed.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push("Unchecked / missed:", "");
+    for (const label of missed) {
+      lines.push(`• ${label}`);
+    }
+    lines.push("");
+    lines.push("I carried the unchecked ones forward. Do you want me to reschedule any of them for tomorrow?");
+  } else if (done.length > 0) {
+    lines.push("", "Everything in this poll is now recorded as done.");
+  }
+
+  return lines.join("\n").trim();
+}
+
+function shouldSendFollowUp(state) {
+  if (!state || state.follow_up_sent_at || !state.first_interaction_at) return false;
+  const doneCount = Array.isArray(state.selected_labels) ? state.selected_labels.length : 0;
+  const missedCount = Array.isArray(state.unselected_labels) ? state.unselected_labels.length : 0;
+  return doneCount > 0 || missedCount > 0;
+}
+
+function summarizeState(state) {
+  return {
+    batch_id: state.batch_id,
+    status: state.status,
+    poll_id: state.poll_id,
+    first_interaction_at: state.first_interaction_at || null,
+    close_at: state.close_at || null,
+    selected_page_ids: state.selected_page_ids || [],
+    unselected_page_ids: state.unselected_page_ids || [],
+    follow_up_sent_at: state.follow_up_sent_at || null,
+    follow_up_message_id: state.follow_up_message_id || null,
+    follow_up_failed_at: state.follow_up_failed_at || null,
+    follow_up_error: state.follow_up_error || null
+  };
+}
+
+function isResolvedForWatch(state, applyMutations) {
+  if (!["applied", "ready_to_apply", "expired_unanswered"].includes(state.status)) return false;
+  if (!applyMutations) return true;
+  if (state.status === "expired_unanswered") return true;
+  if (!shouldSendFollowUp(state)) return true;
+  return Boolean(state.follow_up_sent_at);
+}
+
+async function maybeSendFollowUp(state, { now = nowIso() } = {}) {
+  const isDryRun =
+    String(state.poll_id || "").startsWith("dry-run-") ||
+    String(state.message_id || "").startsWith("dry-run-");
+  if (isDryRun || !shouldSendFollowUp(state)) return state;
+
+  const followUp = eodFollowUpText(state);
+  if (!followUp) return state;
+
+  try {
+    const sent = await sendTelegramMessage({
+      accountId: state.account_id,
+      chatId: state.chat_id,
+      text: followUp
+    });
+    const notifiedState = {
+      ...state,
+      follow_up_sent_at: now,
+      follow_up_message_id: sent.message_id,
+      follow_up_chat_id: sent.chat_id,
+      follow_up_failed_at: null,
+      follow_up_error: null
+    };
+    writePollState(notifiedState);
+    return notifiedState;
+  } catch (error) {
+    const failedState = {
+      ...state,
+      follow_up_failed_at: now,
+      follow_up_error: String(error)
+    };
+    writePollState(failedState);
+    return failedState;
+  }
 }
 
 function applyDoneOutcome(task, date) {
@@ -302,6 +412,9 @@ export async function cmdSendEodPoll(args) {
   const chatId = String(args.target || TELEGRAM_POLL_TARGET);
   const closeAfterSeconds = parseSeconds(args["close-after-seconds"], 60);
   const expireAfterSeconds = parseSeconds(args["expire-after-seconds"], 43200);
+  const watchSeconds = parseWatchSeconds(args["watch-seconds"] ?? args.watch, 180);
+  const watchIntervalSeconds = parseSeconds(args["watch-interval-seconds"], 2);
+  const carryTo = args["carry-to"] || "this week";
   const build = buildPollBatches(date, eodPollCandidates(date));
 
   if (build.count === 0) {
@@ -316,6 +429,7 @@ export async function cmdSendEodPoll(args) {
   }
 
   const sent = [];
+  const batchIds = [];
   for (const poll of build.polls) {
     const optionLabels = poll.options.map((option) => option.compact_label);
     const sentPoll = args["dry-run"] === true
@@ -367,6 +481,7 @@ export async function cmdSendEodPoll(args) {
       apply_result: null
     };
     writePollState(state);
+    batchIds.push(state.batch_id);
     sent.push({
       batch_id: state.batch_id,
       poll_id: state.poll_id,
@@ -376,6 +491,16 @@ export async function cmdSendEodPoll(args) {
     });
   }
 
+  const watch =
+    watchSeconds > 0
+      ? await waitForPollResolution(batchIds, {
+          carryTo,
+          watchSeconds,
+          watchIntervalSeconds,
+          applyMutations: true
+        })
+      : null;
+
   emitJson({
     ok: true,
     action: "send-eod-poll",
@@ -383,7 +508,8 @@ export async function cmdSendEodPoll(args) {
     run_id: build.run_id,
     count: build.count,
     polls_sent: sent.length,
-    sent
+    sent,
+    ...(watch ? { watch } : {})
   });
 }
 
@@ -439,7 +565,7 @@ function refreshStateFromAnswerLog(state) {
   const latestSelection = buildApplySummary(state, latestIndexes);
   return {
     ...state,
-    status: "active",
+    status: ["sent", "active"].includes(state.status) ? "active" : state.status,
     first_interaction_at: firstInteractionAt,
     close_at: closeAt,
     latest_answer_at: latest.recorded_at || null,
@@ -531,7 +657,90 @@ async function closeAndApplyState(
     apply_result: applyResult
   };
   writePollState(nextState);
-  return nextState;
+  return applyMutations && !isDryRun
+    ? maybeSendFollowUp(nextState, { now })
+    : nextState;
+}
+
+async function processState(
+  rawState,
+  { carryTo = "this week", now = nowIso(), applyMutations = true } = {}
+) {
+  let state = refreshStateFromAnswerLog(rawState);
+  const sentTs = Date.parse(state.sent_at || "");
+  const closeTs = Date.parse(state.close_at || "");
+  const expireTs =
+    Number.isFinite(sentTs) && Number.isFinite(state.expire_after_seconds)
+      ? sentTs + state.expire_after_seconds * 1000
+      : null;
+
+  if (state.status === "applied" && applyMutations && !state.follow_up_sent_at) {
+    return maybeSendFollowUp(state, { now });
+  }
+
+  if (state.first_interaction_at && Number.isFinite(closeTs) && Date.parse(now) >= closeTs) {
+    return closeAndApplyState(state, { carryTo, now, applyMutations });
+  }
+
+  if (!state.first_interaction_at && expireTs !== null && Date.parse(now) >= expireTs) {
+    return closeAndApplyState(state, { carryTo, now, applyMutations });
+  }
+
+  writePollState(state);
+  return state;
+}
+
+async function waitForPollResolution(
+  batchIds,
+  {
+    carryTo = "this week",
+    watchSeconds = 180,
+    watchIntervalSeconds = 2,
+    applyMutations = true
+  } = {}
+) {
+  if (!Array.isArray(batchIds) || batchIds.length === 0 || watchSeconds <= 0) {
+    return {
+      status: "skipped",
+      timed_out: false,
+      count: 0,
+      batches: []
+    };
+  }
+
+  const deadline = Date.now() + watchSeconds * 1000;
+  const pollIntervalMs = Math.max(1, watchIntervalSeconds) * 1000;
+
+  while (Date.now() <= deadline) {
+    const batches = [];
+    for (const batchId of batchIds) {
+      const state = await processState(readPollState(batchId), {
+        carryTo,
+        now: nowIso(),
+        applyMutations
+      });
+      batches.push(summarizeState(state));
+    }
+
+    if (batches.every((state) => isResolvedForWatch(state, applyMutations))) {
+      return {
+        status: "resolved",
+        timed_out: false,
+        count: batches.length,
+        batches
+      };
+    }
+
+    sleep(pollIntervalMs);
+  }
+
+  const batches = batchIds.map((batchId) => summarizeState(readPollState(batchId)));
+  return {
+    status: "timeout",
+    timed_out: true,
+    count: batches.length,
+    batches
+  };
 }
 
 export async function cmdProcessEodPolls(args) {
@@ -541,48 +750,17 @@ export async function cmdProcessEodPolls(args) {
   const batchId = args["batch-id"] || null;
   const states = batchId
     ? [readPollState(batchId)]
-    : listPollStates({}).filter((state) => ["sent", "active"].includes(state.status));
+    : listPollStates({}).filter((state) =>
+        ["sent", "active"].includes(state.status) ||
+        (state.status === "applied" && !state.follow_up_sent_at)
+      );
 
   const processed = [];
   for (const rawState of states) {
-    let state = refreshStateFromAnswerLog(rawState);
-    const sentTs = Date.parse(state.sent_at || "");
-    const closeTs = Date.parse(state.close_at || "");
-    const expireTs =
-      Number.isFinite(sentTs) && Number.isFinite(state.expire_after_seconds)
-        ? sentTs + state.expire_after_seconds * 1000
-        : null;
-
-    if (state.first_interaction_at && Number.isFinite(closeTs) && Date.parse(now) >= closeTs) {
-      state = await closeAndApplyState(state, { carryTo, now, applyMutations });
-      processed.push({
-        batch_id: state.batch_id,
-        mutation_mode: state.mutation_mode || (applyMutations ? "apply" : "preview"),
-        status: state.status,
-        selected_page_ids: state.selected_page_ids || [],
-        unselected_page_ids: state.unselected_page_ids || []
-      });
-      continue;
-    }
-
-    if (!state.first_interaction_at && expireTs !== null && Date.parse(now) >= expireTs) {
-      state = await closeAndApplyState(state, { carryTo, now, applyMutations });
-      processed.push({
-        batch_id: state.batch_id,
-        mutation_mode: state.mutation_mode || (applyMutations ? "apply" : "preview"),
-        status: state.status,
-        selected_page_ids: state.selected_page_ids || [],
-        unselected_page_ids: state.unselected_page_ids || []
-      });
-      continue;
-    }
-
-    writePollState(state);
+    const state = await processState(rawState, { carryTo, now, applyMutations });
     processed.push({
-      batch_id: state.batch_id,
-      status: state.status,
-      first_interaction_at: state.first_interaction_at,
-      close_at: state.close_at
+      ...summarizeState(state),
+      mutation_mode: state.mutation_mode || (applyMutations ? "apply" : "preview")
     });
   }
 

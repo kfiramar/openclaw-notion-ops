@@ -152,13 +152,16 @@ Core commands:
 
 - `capture --title "..." [--project "..."] [--goal "..."] [--due-date YYYY-MM-DD]`
   - if `--start` and `--end` are supplied, the wrapper now creates the matching Google Calendar event and stores the event ID alongside the Notion schedule fields
+  - by default, `capture` reuses a high-confidence existing active task instead of creating a near-duplicate; pass `--allow-duplicate true` to force a new task
 - `plan-day [--date today|YYYY-MM-DD] [--limit N] [--start-hour H] [--end-hour H]`
+- `tomorrow-plan [--date tomorrow|YYYY-MM-DD] [--days N] [--limit N]`
 - `plan-week [--date today|YYYY-MM-DD] [--promote-limit N] [--capacity-minutes N]`
 - `show --view today|week|month|year|inbox|blocked|needs_scheduling|execution|calendar`
 - `inspect-task --match "..." | --page-id <PAGE_ID>`
 - `find-task --page-id <PAGE_ID> | --title-exact "..." | --match "..." [--first|--latest]`
 - `search-tasks --page-id <PAGE_ID> | --title-exact "..." | --match "..." [--first|--latest]`
 - `add-task --title "..." [--horizon today|this week|this month|this year]`
+  - by default, `add-task` reuses a high-confidence existing active task instead of creating a near-duplicate; pass `--allow-duplicate true` to force a new task
 - `move-task --match "..." | --page-id <PAGE_ID> [--horizon ...] [--stage ...]`
 - `promote --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year`
 - `defer --match "..." | --page-id <PAGE_ID> --to today|this week|this month|this year`
@@ -177,15 +180,31 @@ Core commands:
 
 Maintenance commands:
 
+- short cron workflow commands:
+  - `reconcile` reconcile + sync
+  - `morning-plan` morning-plan workflow
+  - `morning-sweep` morning scheduling sweep
+  - `evening` close-day + evening summary
+  - `eod-poll` send daily completion poll
+  - `eod-watch` process daily completion poll watcher
+  - `poll-watch` process generic Telegram poll reply watcher
+  - `weekly-review` weekly overview prep
+  - `weekly-sweep` weekly scheduling sweep
+  - `priority-review` life-priority prep
+  - `monthly-review` monthly review prep
+  - `yearly-review` yearly review prep
 - `show-completed [--date today|YYYY-MM-DD]`
 - `evening-summary [--date today|YYYY-MM-DD] [--days N] [--task-limit N]`
 - `close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]`
 - `list-eod-poll-candidates [--date today|YYYY-MM-DD]`
 - `build-eod-poll [--date today|YYYY-MM-DD]`
-- `send-eod-poll [--date today|YYYY-MM-DD] [--account bot4] [--target 492482728] [--close-after-seconds 60] [--expire-after-seconds 43200] [--dry-run]`
+- `send-eod-poll [--date today|YYYY-MM-DD] [--account bot4] [--target 492482728] [--carry-to this week|this month|this year] [--close-after-seconds 60] [--expire-after-seconds 43200] [--watch|--watch-seconds N] [--watch-interval-seconds N] [--dry-run]`
 - `process-eod-polls [--batch-id <BATCH_ID>] [--carry-to this week] [--now ISO]`
 - `process-eod-polls [--batch-id <BATCH_ID>] [--carry-to this week] [--now ISO] [--no-apply]`
 - `apply-eod-poll-results [--date today|YYYY-MM-DD] [--selected-page-ids <ID,ID>] [--unselected-page-ids <ID,ID>] [--carry-to this week]`
+- `send-telegram-poll --question "..." --options "Option 1|Option 2|Option 3" [--account bot4] [--target 492482728] [--multiple true|false] [--notify-on-answer true|false]`
+- `read-telegram-poll [--poll-id <POLL_ID>] [--account bot4]`
+- `process-telegram-poll-replies [--poll-id <POLL_ID>] [--account bot4]`
 - `triage-inbox [--date YYYY-MM-DD] [--limit N] [--apply]`
 - `review-stale [--date today|YYYY-MM-DD] [--miss-threshold N] [--blocked-days N]`
 - `scheduling-decisions [--date today|tomorrow|YYYY-MM-DD] [--days N] [--limit N]`
@@ -218,9 +237,15 @@ This lets active tasks disappear from Notion views while still preserving a dura
 - `sync:dashboards` refreshes the root/daily/weekly page navigation from `LIFESTYLE_BOARD.json`, and also replaces the root menu's nested Today/This Week/This Month/This Year memo blocks with live task lists.
 - `sync:crons` pushes the repo-managed cron prompts/schedules into the live OpenClaw scheduler.
 - `send-eod-poll` creates one or more Telegram-native multi-select polls for confirmable `today` tasks and persists poll state under `history/polls`.
+- `send-eod-poll --watch` is the interactive path when the same session should wait for your vote, apply the result, and send the grounded follow-up without depending on the minute cron watcher.
 - `process-eod-polls` consumes persisted Telegram poll answers, closes due polls, and applies selected vs unselected task outcomes back into the wrapper.
 - `process-eod-polls --no-apply` is the safe preview path for verifying poll-answer ingestion and selected-vs-unselected mapping without mutating tasks.
+- persisted EOD poll state now records follow-up delivery details such as `follow_up_message_id` or `follow_up_error`, so Telegram delivery failures are inspectable instead of silent.
 - end-of-day poll answer ingestion currently depends on the live OpenClaw Telegram runtime hook added by `npm run patch:telegram-poll-hook`.
+- `send-telegram-poll` sends a non-anonymous Telegram-native poll and persists `poll_id`, `message_id`, and option order under `history/telegram-polls`.
+- `read-telegram-poll` reads back the latest captured answer for that persisted poll metadata and maps zero-based `option_ids` back to option labels.
+- `process-telegram-poll-replies` sends an automatic Telegram follow-up message when a persisted poll receives a new answer and `--notify-on-answer true` was used at send time.
+- `sync:crons` also installs a minute-based `Lifestyle telegram poll reply watcher`, so wrapper polls sent with `--notify-on-answer true` can automatically answer back in chat after a vote lands.
 - `smoke:cron -- --name "Daily overview with OpenClaw"` runs a named cron immediately and prints its latest persisted run history.
 - dedicated cron smoke commands are available for the main user-facing surfaces:
   - `npm run smoke:morning`

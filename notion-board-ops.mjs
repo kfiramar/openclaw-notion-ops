@@ -35,11 +35,31 @@ import {
   cmdSendEodPoll
 } from "./src/eod-poll.mjs";
 import {
+  cmdProcessTelegramPollReplies,
+  cmdReadTelegramPoll,
+  cmdSendTelegramPoll
+} from "./src/telegram-poll.mjs";
+import {
+  cmdAm,
+  cmdEp,
+  cmdEw,
+  cmdLp,
+  cmdMo,
+  cmdMs,
+  cmdPm,
+  cmdPw,
+  cmdRc,
+  cmdWk,
+  cmdWs,
+  cmdYr
+} from "./src/workflows.mjs";
+import {
   cmdCloseDay,
   cmdEveningSummary,
   cmdRefreshManualRepeat,
   cmdGoalReview,
   cmdPlanDay,
+  cmdTomorrowPlan,
   cmdPlanWeek,
   cmdProjectReview,
   cmdReconcileCalendar,
@@ -52,6 +72,54 @@ import {
 import { parseArgs } from "./src/util.mjs";
 
 const COMMANDS = {
+  reconcile: {
+    help: "reconcile [--no-apply] [--no-sync] [--full]",
+    run: cmdRc
+  },
+  "morning-plan": {
+    help: "morning-plan [--date today|YYYY-MM-DD] [--days N] [--limit N] [--plan-limit N] [--decision-limit N] [--no-apply]",
+    run: cmdAm
+  },
+  "morning-sweep": {
+    help: "morning-sweep [--date today|YYYY-MM-DD] [--days N] [--limit N] [--no-apply] [--no-sync] [--full]",
+    run: cmdMs
+  },
+  evening: {
+    help: "evening [--date today|YYYY-MM-DD] [--days N] [--task-limit N] [--carry-to this week|this month|this year] [--json]",
+    run: cmdPm
+  },
+  "eod-poll": {
+    help: "eod-poll [--date today|YYYY-MM-DD] [--account bot4] [--target 492482728] [--carry-to this week|this month|this year] [--close-after-seconds 60] [--expire-after-seconds 43200] [--watch|--watch-seconds N] [--watch-interval-seconds N] [--dry-run]",
+    run: cmdEp
+  },
+  "eod-watch": {
+    help: "eod-watch [--batch-id <BATCH_ID>] [--carry-to this week] [--now ISO] [--no-apply]",
+    run: cmdEw
+  },
+  "poll-watch": {
+    help: "poll-watch [--poll-id <POLL_ID>] [--account bot4]",
+    run: cmdPw
+  },
+  "weekly-review": {
+    help: "weekly-review [--date today|YYYY-MM-DD] [--days N] [--limit N] [--no-apply] [--no-sync] [--full]",
+    run: cmdWk
+  },
+  "weekly-sweep": {
+    help: "weekly-sweep [--date today|YYYY-MM-DD] [--days N] [--limit N] [--no-apply] [--no-sync] [--full]",
+    run: cmdWs
+  },
+  "priority-review": {
+    help: "priority-review [--date today|YYYY-MM-DD]",
+    run: cmdLp
+  },
+  "monthly-review": {
+    help: "monthly-review [--date today|YYYY-MM-DD]",
+    run: cmdMo
+  },
+  "yearly-review": {
+    help: "yearly-review",
+    run: cmdYr
+  },
   show: {
     help: "show --view today|week|month|year|inbox|blocked|overdue|needs_scheduling|execution|calendar",
     run: cmdShow
@@ -69,7 +137,7 @@ const COMMANDS = {
     run: cmdBuildEodPoll
   },
   "send-eod-poll": {
-    help: "send-eod-poll [--date today|YYYY-MM-DD] [--account bot4] [--target 492482728] [--close-after-seconds 60] [--expire-after-seconds 43200] [--dry-run]",
+    help: "send-eod-poll [--date today|YYYY-MM-DD] [--account bot4] [--target 492482728] [--carry-to this week|this month|this year] [--close-after-seconds 60] [--expire-after-seconds 43200] [--watch|--watch-seconds N] [--watch-interval-seconds N] [--dry-run]",
     run: cmdSendEodPoll
   },
   "process-eod-polls": {
@@ -80,17 +148,33 @@ const COMMANDS = {
     help: "apply-eod-poll-results [--date today|YYYY-MM-DD] [--selected-page-ids <ID,ID>] [--unselected-page-ids <ID,ID>] [--carry-to this week]",
     run: cmdApplyEodPollResults
   },
+  "send-telegram-poll": {
+    help: 'send-telegram-poll --question "..." --options "Option 1|Option 2|Option 3" [--account bot4] [--target 492482728] [--multiple true|false] [--notify-on-answer true|false]',
+    run: cmdSendTelegramPoll
+  },
+  "read-telegram-poll": {
+    help: "read-telegram-poll [--poll-id <POLL_ID>] [--account bot4]",
+    run: cmdReadTelegramPoll
+  },
+  "process-telegram-poll-replies": {
+    help: "process-telegram-poll-replies [--poll-id <POLL_ID>] [--account bot4]",
+    run: cmdProcessTelegramPollReplies
+  },
   "evening-summary": {
     help: "evening-summary [--date today|YYYY-MM-DD] [--days N] [--task-limit N]",
     run: cmdEveningSummary
   },
   capture: {
-    help: 'capture --title "..." [--project "..."] [--goal "..."] [--horizon today|this week|this month|this year] [--due-date YYYY-MM-DD] [--start ISO --end ISO] [--cadence daily|weekly|monthly] [--repeat-mode none|cadence|manual_repeat|goal_derived] [--repeat-window week|month|year] [--repeat-target-count N] [--repeat-days "Sunday,Monday,..."] [--needs-calendar true|false] [--scheduling-mode hard_time|flexible_block|routine_window|list_only] [--schedule-type hard|soft] [--estimated-minutes N]',
+    help: 'capture --title "..." [--project "..."] [--goal "..."] [--horizon today|this week|this month|this year] [--due-date YYYY-MM-DD] [--start ISO --end ISO] [--cadence daily|weekly|monthly] [--repeat-mode none|cadence|manual_repeat|goal_derived] [--repeat-window week|month|year] [--repeat-target-count N] [--repeat-days "Sunday,Monday,..."] [--needs-calendar true|false] [--scheduling-mode hard_time|flexible_block|routine_window|list_only] [--schedule-type hard|soft] [--estimated-minutes N] [--allow-duplicate true]',
     run: cmdCapture
   },
   "plan-day": {
     help: "plan-day [--date today|YYYY-MM-DD] [--limit N] [--start-hour H] [--end-hour H]",
     run: cmdPlanDay
+  },
+  "tomorrow-plan": {
+    help: "tomorrow-plan [--date tomorrow|YYYY-MM-DD] [--days N] [--limit N]",
+    run: cmdTomorrowPlan
   },
   "plan-week": {
     help: "plan-week [--date today|YYYY-MM-DD] [--promote-limit N] [--capacity-minutes N]",
@@ -145,11 +229,11 @@ const COMMANDS = {
     run: cmdSearchTasks
   },
   "add-task": {
-    help: 'add-task --title "..." [--horizon today|this week|this month|this year] [--project "..."] [--project-id <ID>] [--goal "..."] [--goal-id <ID>] [--cadence daily|weekly|monthly] [--repeat-mode none|cadence|manual_repeat|goal_derived] [--repeat-window week|month|year] [--repeat-target-count N] [--repeat-days "Sunday,Monday,..."] [--needs-calendar true|false] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
+    help: 'add-task --title "..." [--horizon today|this week|this month|this year] [--project "..."] [--project-id <ID>] [--goal "..."] [--goal-id <ID>] [--cadence daily|weekly|monthly] [--repeat-mode none|cadence|manual_repeat|goal_derived] [--repeat-window week|month|year] [--repeat-target-count N] [--repeat-days "Sunday,Monday,..."] [--needs-calendar true|false] [--scheduling-mode hard_time|flexible_block|routine_window|list_only] [--allow-duplicate true]',
     run: cmdAddTask
   },
   "move-task": {
-    help: 'move-task --match "..." | --page-id <PAGE_ID> [--horizon ...] [--stage ...] [--due-date YYYY-MM-DD] [--scheduled-start ISO] [--scheduled-end ISO] [--needs-calendar true|false] [--scheduling-mode ...] [--schedule-type hard|soft]',
+    help: 'move-task --match "..." | --page-id <PAGE_ID> [--horizon ...] [--stage ...] [--due-date YYYY-MM-DD] [--scheduled-start ISO|YYYY-MM-DD] [--scheduled-end ISO|YYYY-MM-DD] [--needs-calendar true|false] [--scheduling-mode ...] [--schedule-type hard|soft]',
     run: cmdMoveTask
   },
   promote: {
@@ -177,7 +261,7 @@ const COMMANDS = {
     run: cmdDeleteTask
   },
   "set-schedule": {
-    help: 'set-schedule --match "..." | --page-id <PAGE_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
+    help: 'set-schedule --match "..." | --page-id <PAGE_ID> --start ISO|YYYY-MM-DD [--end ISO|YYYY-MM-DD] [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
     run: cmdSetSchedule
   },
   "set-series-schedule": {
@@ -189,7 +273,7 @@ const COMMANDS = {
     run: cmdSetMultiSchedule
   },
   "link-schedule": {
-    help: 'link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
+    help: 'link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start ISO|YYYY-MM-DD [--end ISO|YYYY-MM-DD] [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
     run: cmdLinkSchedule
   },
   "unlink-schedule": {
@@ -209,7 +293,7 @@ const COMMANDS = {
     run: cmdRemoveSchedule
   },
   "reschedule-task": {
-    help: 'reschedule-task --match "..." | --page-id <PAGE_ID> --start ISO --end ISO [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
+    help: 'reschedule-task --match "..." | --page-id <PAGE_ID> --start ISO|YYYY-MM-DD [--end ISO|YYYY-MM-DD] [--schedule-type hard|soft] [--scheduling-mode hard_time|flexible_block|routine_window|list_only]',
     run: cmdRescheduleTask
   },
   "list-projects": {

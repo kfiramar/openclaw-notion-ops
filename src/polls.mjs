@@ -5,6 +5,7 @@ import {
   OPENCLAW_CONTAINER_ROOT,
   OPENCLAW_HOST_ROOT,
   POLL_STATE_ROOT,
+  TELEGRAM_POLL_HISTORY_ROOT,
   TELEGRAM_POLL_ACCOUNT
 } from "./config.mjs";
 import { readJsonLines, resolveRuntimePath } from "./util.mjs";
@@ -36,6 +37,10 @@ export function pollStateRoot() {
   return resolvePollPath(POLL_STATE_ROOT);
 }
 
+export function telegramPollHistoryRoot() {
+  return resolvePollPath(TELEGRAM_POLL_HISTORY_ROOT);
+}
+
 export function answerLogPath(accountId = TELEGRAM_POLL_ACCOUNT) {
   return resolvePollPath(`${TELEGRAM_POLL_ANSWER_DIR}/poll-answers-${accountId}.jsonl`);
 }
@@ -60,6 +65,10 @@ export function ensurePollStateDir() {
   fs.mkdirSync(pollStateRoot(), { recursive: true });
 }
 
+export function ensureTelegramPollHistoryDir() {
+  fs.mkdirSync(telegramPollHistoryRoot(), { recursive: true });
+}
+
 export function writePollState(state) {
   ensurePollStateDir();
   const filePath = batchStatePath(state.batch_id);
@@ -75,6 +84,45 @@ export function readPollStateByPath(filePath) {
 
 export function readPollState(batchId) {
   return readPollStateByPath(batchStatePath(batchId));
+}
+
+export function telegramPollMetadataPath(pollId) {
+  return path.join(telegramPollHistoryRoot(), `${pollId}.json`);
+}
+
+export function telegramPollLatestPath(accountId = TELEGRAM_POLL_ACCOUNT) {
+  return path.join(telegramPollHistoryRoot(), `${normalizeAccountId(accountId)}-latest.json`);
+}
+
+export function writeTelegramPollMetadata(metadata) {
+  ensureTelegramPollHistoryDir();
+  const primaryPath = telegramPollMetadataPath(metadata.poll_id);
+  const latestPath = telegramPollLatestPath(metadata.account_id);
+  for (const filePath of [primaryPath, latestPath]) {
+    const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tempPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+    fs.renameSync(tempPath, filePath);
+  }
+  return primaryPath;
+}
+
+export function readTelegramPollMetadata(pollId) {
+  return readPollStateByPath(telegramPollMetadataPath(pollId));
+}
+
+export function readLatestTelegramPollMetadata(accountId = TELEGRAM_POLL_ACCOUNT) {
+  return readPollStateByPath(telegramPollLatestPath(accountId));
+}
+
+export function listTelegramPollMetadata() {
+  const root = telegramPollHistoryRoot();
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root)
+    .filter((name) => name.endsWith(".json"))
+    .filter((name) => !name.endsWith("-latest.json"))
+    .map((name) => path.join(root, name))
+    .sort()
+    .map((filePath) => readPollStateByPath(filePath));
 }
 
 export function listPollStateFiles() {

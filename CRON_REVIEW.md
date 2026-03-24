@@ -31,30 +31,34 @@ All schedules below are in `Asia/Jerusalem`.
    - Silent watcher that checks whether a sent nightly poll has received its first answer, closes it after the delay window, and applies results.
    - Improvement already applied: answer ingestion is now persisted and machine-readable, not prompt-only.
 
-6. `every 30 minutes` — `Lifestyle reconcile`
+6. `every 1 minute` — `Lifestyle telegram poll reply watcher`
+   - Silent watcher for generic wrapper polls sent with `--notify-on-answer true`.
+   - Improvement already applied: a voted poll can now trigger an automatic follow-up message with the selected options.
+
+7. `every 30 minutes` — `Lifestyle reconcile`
    - Silent lifecycle cleanup and consistency pass.
    - Improvement already applied: respects `@auto-done` / `@no-check`, rolls recurring work forward, and updates miss counts.
 
 ### Weekly
 
-7. `Saturday 09:00` — `Weekly overview with OpenClaw`
+8. `Saturday 09:00` — `Weekly overview with OpenClaw`
    - User-facing weekly review and next-week planning message.
    - Improvement already applied: `Schedule these` only offers actually missing future coverage and prefers OpenViking-backed timing suggestions.
 
-8. `Saturday 09:20` — `Lifestyle weekly scheduling sweep`
+9. `Saturday 09:20` — `Lifestyle weekly scheduling sweep`
    - Silent weekly hard-time placement pass that runs after the weekly overview.
    - Improvement already applied: only explicit hard-time work is auto-placed.
 
-9. `Sunday 20:00` — `Life priority meeting with OpenClaw`
+10. `Sunday 20:00` — `Life priority meeting with OpenClaw`
    - User-facing weekly priority check-in.
    - Improvement already applied: sharper prompt focused on real priorities, drift, and tradeoffs.
 
 ### Monthly and yearly
 
-10. `1st of month 09:30` — `Lifestyle monthly review`
+11. `1st of month 09:30` — `Lifestyle monthly review`
     - User-facing monthly review and adjustment pass.
 
-11. `January 1st 10:00` — `Lifestyle yearly review`
+12. `January 1st 10:00` — `Lifestyle yearly review`
     - User-facing yearly direction review.
 
 ## Important Clarifications
@@ -76,6 +80,7 @@ All schedules below are in `Asia/Jerusalem`.
 
 - Telegram poll sending and Telegram poll result application are not the same event.
 - The watcher exists so the system can close polls after first interaction and apply results later without blocking the send cron.
+- The same separation now exists for generic wrapper polls: sending the poll and replying with the captured selection are decoupled, and the minute watcher handles the follow-up.
 
 ## Improvements Already Implemented In Repo
 

@@ -2,32 +2,24 @@
 
 import fs from "node:fs";
 
-const target =
-  process.env.OPENCLAW_TELEGRAM_RUNTIME ||
-  "/docker/openclaw-pma3/data/.npm-global/lib/node_modules/openclaw/dist/auth-profiles-DDVivXkv.js";
+const explicitTarget = process.env.OPENCLAW_TELEGRAM_RUNTIME || "";
+const targets = explicitTarget
+  ? [explicitTarget]
+  : [
+      "/docker/openclaw-pma3/data/.npm-global/lib/node_modules/openclaw/dist/auth-profiles-DDVivXkv.js",
+      "/docker/openclaw-pma3/data/.npm-global/lib/node_modules/openclaw/dist/auth-profiles-DRjqKE3G.js",
+      "/docker/openclaw-pma3/data/.npm-global/lib/node_modules/openclaw/dist/reply-Bm8VrLQh.js",
+      "/docker/openclaw-pma3/data/.npm-global/lib/node_modules/openclaw/dist/model-selection-CU2b7bN6.js",
+      "/docker/openclaw-pma3/data/.npm-global/lib/node_modules/openclaw/dist/model-selection-46xMp11W.js",
+      "/docker/openclaw-pma3/data/.npm-global/lib/node_modules/openclaw/dist/discord-CcCLMjHw.js"
+    ];
 
-const marker = 'bot.on("poll_answer", async (ctx) => {';
+const marker = 'bot.use(async (ctx, next) => {\n\t\ttry {\n\t\t\tconst answer = ctx.update?.poll_answer;';
 const needle = 'bot.on("message", async (ctx) => {';
-
-if (!fs.existsSync(target)) {
-  throw new Error(`runtime file not found: ${target}`);
-}
-
-const source = fs.readFileSync(target, "utf8");
-if (source.includes(marker)) {
-  console.log(JSON.stringify({ ok: true, patched: false, reason: "already-patched", target }, null, 2));
-  process.exit(0);
-}
-
-if (!source.includes(needle)) {
-  throw new Error(`could not find injection point in ${target}`);
-}
-
-const injection = `bot.on("poll_answer", async (ctx) => {
+const injection = `bot.use(async (ctx, next) => {
 \t\ttry {
-\t\t\tif (shouldSkipUpdate(ctx)) return;
 \t\t\tconst answer = ctx.update?.poll_answer;
-\t\t\tif (!answer?.poll_id) return;
+\t\t\tif (answer?.poll_id) {
 \t\t\tconst accountKey = accountId ?? "default";
 \t\t\tconst filePath = \`/data/.openclaw/telegram/poll-answers-\${accountKey}.jsonl\`;
 \t\t\tconst row = {
@@ -40,13 +32,36 @@ const injection = `bot.on("poll_answer", async (ctx) => {
 \t\t\t};
 \t\t\tawait fs$1.mkdir("/data/.openclaw/telegram", { recursive: true });
 \t\t\tawait fs$1.appendFile(filePath, \`\${JSON.stringify(row)}\\n\`);
+\t\t\t}
 \t\t} catch (err) {
 \t\t\truntime.error?.(danger(\`[telegram] poll_answer handler failed: \${String(err)}\`));
 \t\t}
+\t\tawait next();
 \t});
 \t`;
 
-const patched = source.replace(needle, `${injection}${needle}`);
-fs.writeFileSync(target, patched);
+const results = [];
 
-console.log(JSON.stringify({ ok: true, patched: true, target }, null, 2));
+for (const target of targets) {
+  if (!fs.existsSync(target)) {
+    results.push({ ok: false, target, reason: "missing" });
+    continue;
+  }
+
+  const source = fs.readFileSync(target, "utf8");
+  if (source.includes(marker)) {
+    results.push({ ok: true, patched: false, reason: "already-patched", target });
+    continue;
+  }
+
+  if (!source.includes(needle)) {
+    results.push({ ok: false, target, reason: "needle-not-found" });
+    continue;
+  }
+
+  const patched = source.replace(needle, `${injection}${needle}`);
+  fs.writeFileSync(target, patched);
+  results.push({ ok: true, patched: true, target });
+}
+
+console.log(JSON.stringify({ ok: true, results }, null, 2));

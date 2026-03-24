@@ -84,6 +84,14 @@ function recurrenceArgs(rrules = []) {
   return values.flatMap((rule) => ["--rrule", rule]);
 }
 
+function isDateOnlyValue(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function allDayArgs(start, end) {
+  return isDateOnlyValue(start) && isDateOnlyValue(end) ? ["--all-day"] : [];
+}
+
 export function createCalendarEvent(summaryText, start, end, calendarId = PRIMARY_CALENDAR_ID, options = {}) {
   const output = runCalendar([
     "calendar",
@@ -95,6 +103,7 @@ export function createCalendarEvent(summaryText, start, end, calendarId = PRIMAR
     start,
     "--to",
     end,
+    ...allDayArgs(start, end),
     ...recurrenceArgs(options.rrules),
     "--json"
   ]);
@@ -113,6 +122,7 @@ export function updateCalendarEvent(eventId, summaryText, start, end, calendarId
     start,
     "--to",
     end,
+    ...allDayArgs(start, end),
     ...recurrenceArgs(options.rrules),
     "--json"
   ]);

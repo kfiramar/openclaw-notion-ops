@@ -284,6 +284,54 @@ await step("find-search-deterministic-lookup", async () => {
   };
 });
 
+await step("reuse-near-duplicate-task-titles", async () => {
+  const existingTitle = title("Meal prepping");
+  const aliasTitle = title("Meal prep");
+  const add = runWrapper([
+    "add-task",
+    "--title",
+    existingTitle,
+    "--date",
+    BASE_DATE,
+    "--horizon",
+    "this week"
+  ]);
+  const pageId = recordTask(add.page_id);
+
+  const reusedAdd = runWrapper([
+    "add-task",
+    "--title",
+    aliasTitle,
+    "--horizon",
+    "today"
+  ]);
+  assert(reusedAdd.reused_existing === true, "add-task did not reuse a near-duplicate task");
+  assert(reusedAdd.page_id === pageId, "add-task reused the wrong task");
+
+  const afterAdd = inspectTask(pageId);
+  assert(afterAdd.properties.Horizon === "today", "reused add-task did not apply explicit horizon");
+
+  const capture = runWrapper([
+    "capture",
+    "--title",
+    aliasTitle,
+    "--start",
+    `${NEXT_DAY}T09:00:00+02:00`,
+    "--end",
+    `${NEXT_DAY}T09:30:00+02:00`,
+    "--verify"
+  ]);
+  assert(capture.reused_existing === true, "capture did not reuse a near-duplicate task");
+  assert(capture.page_id === pageId, "capture reused the wrong task");
+  assert(capture.verified === true, "capture reuse did not verify");
+
+  return {
+    page_id: pageId,
+    reuse_reason: capture.reuse_reason,
+    calendar_event_id: capture.calendar_event_id
+  };
+});
+
 await step("triage-block-review-stale", async () => {
   const add = runWrapper(["add-task", "--title", title("Inbox"), "--date", BASE_DATE]);
   const pageId = recordTask(add.page_id);

@@ -18,6 +18,7 @@ import {
   defaultHorizonForCadence,
   encodeCalendarRefs,
   findTask,
+  findReusableTaskCandidate,
   inferHorizon,
   inferNeedsCalendar,
   inferRepeatModeFromShape,
@@ -61,13 +62,28 @@ function parseRepeatDaysArg(value) {
     .filter(Boolean);
 }
 
-function assertScheduleRange(label, start, end, { requireBoth = false } = {}) {
+function isDateOnlyValue(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function resolveScheduleRange(label, start, end, { requireBoth = false } = {}) {
   if (requireBoth && (!start || !end)) {
+    if (start && !end && isDateOnlyValue(start)) return { start, end: start, allDay: true };
     throw new Error(`${label} requires both start and end`);
   }
-  if (!start && !end) return;
+  if (!start && !end) return { start: null, end: null, allDay: false };
   if (!start || !end) {
+    if (start && !end && isDateOnlyValue(start)) return { start, end: start, allDay: true };
     throw new Error(`${label} requires both start and end when setting calendar timing`);
+  }
+  const startDateOnly = isDateOnlyValue(start);
+  const endDateOnly = isDateOnlyValue(end);
+  if (startDateOnly !== endDateOnly) {
+    throw new Error(`${label} requires start and end to both be datetimes or both be date-only values`);
+  }
+  if (startDateOnly && endDateOnly) {
+    if (end < start) throw new Error(`${label} requires end to be on or after start`);
+    return { start, end, allDay: true };
   }
   const startTs = Date.parse(start);
   const endTs = Date.parse(end);
@@ -77,6 +93,11 @@ function assertScheduleRange(label, start, end, { requireBoth = false } = {}) {
   if (endTs <= startTs) {
     throw new Error(`${label} requires end to be after start`);
   }
+  return { start, end, allDay: false };
+}
+
+function assertScheduleRange(label, start, end, options = {}) {
+  resolveScheduleRange(label, start, end, options);
 }
 
 function normalizedInstant(value) {
@@ -371,6 +392,34 @@ function verifyFlagEnabled(args) {
   return args.verify === true || args.verify === "true";
 }
 
+function duplicateReuseAllowed(args) {
+  return args["allow-duplicate"] === true || args["allow-duplicate"] === "true";
+}
+
+function taskCreateOrReuseResult(action, {
+  pageId,
+  title,
+  requestedTitle,
+  reusedExisting = false,
+  reuseReason = null,
+  calendarEventId = null,
+  updatesApplied = false,
+  inferred = undefined
+}) {
+  return {
+    ok: true,
+    action,
+    page_id: pageId,
+    title,
+    requested_title: requestedTitle,
+    reused_existing: reusedExisting,
+    reuse_reason: reuseReason,
+    updates_applied: updatesApplied,
+    calendar_event_id: calendarEventId,
+    ...(inferred === undefined ? {} : { inferred })
+  };
+}
+
 function expectedVerifyArgs(args) {
   return {
     archived: args.archived === undefined ? undefined : boolOrNull(args.archived),
@@ -446,6 +495,53 @@ export function cmdAddTask(args) {
   });
   const dueDate = isoDate(args["due-date"] || implicitDueDate || null);
   const nextDueAt = isoDate(args["next-due-at"] || dueDate || null);
+  const projectIds = resolveRelationArg("projects", args, "project", "project-id");
+  const goalIds = resolveRelationArg("goals", args, "goal", "goal-id");
+  const reusableTask = duplicateReuseAllowed(args) ? null : findReusableTaskCandidate(title);
+
+  if (reusableTask) {
+    const updates = {
+      [TASK_FIELDS.stage]: args.stage ? selectProperty(args.stage) : undefined,
+      [TASK_FIELDS.status]: args.status ? selectProperty(args.status) : undefined,
+      [TASK_FIELDS.horizon]: args.horizon ? selectProperty(args.horizon) : undefined,
+      [TASK_FIELDS.type]: args.type ? selectProperty(type) : undefined,
+      [TASK_FIELDS.repeatMode]: args["repeat-mode"] ? selectProperty(repeatMode) : undefined,
+      [TASK_FIELDS.priority]: args.priority ? selectProperty(args.priority) : undefined,
+      [TASK_FIELDS.needsCalendar]:
+        args["needs-calendar"] !== undefined ? checkboxProperty(boolOrNull(args["needs-calendar"])) : undefined,
+      [TASK_FIELDS.schedulingMode]:
+        args["scheduling-mode"] ? selectProperty(args["scheduling-mode"]) : undefined,
+      [TASK_FIELDS.scheduleType]: args["schedule-type"] ? selectProperty(args["schedule-type"]) : undefined,
+      [TASK_FIELDS.estimatedMinutes]:
+        args["estimated-minutes"] === undefined ? undefined : numberProperty(args["estimated-minutes"]),
+      [TASK_FIELDS.energy]: args.energy ? selectProperty(args.energy) : undefined,
+      [TASK_FIELDS.cadence]: args.cadence ? selectProperty(args.cadence) : undefined,
+      [TASK_FIELDS.repeatWindow]: args["repeat-window"] ? selectProperty(args["repeat-window"]) : undefined,
+      [TASK_FIELDS.repeatTargetCount]:
+        args["repeat-target-count"] === undefined ? undefined : numberProperty(args["repeat-target-count"]),
+      [TASK_FIELDS.repeatProgress]:
+        args["repeat-progress"] === undefined ? undefined : numberProperty(args["repeat-progress"]),
+      [TASK_FIELDS.repeatDays]: args["repeat-days"] ? multiSelectProperty(repeatDays) : undefined,
+      [TASK_FIELDS.dueDate]: args["due-date"] ? dateProperty(dueDate) : undefined,
+      [TASK_FIELDS.nextDueAt]: args["next-due-at"] ? dateProperty(nextDueAt) : undefined,
+      [TASK_FIELDS.reviewNotes]: args.notes ? richTextProperty(args.notes) : undefined,
+      [TASK_FIELDS.project]:
+        args.project || args["project-id"] ? relationProperty(projectIds) : undefined,
+      [TASK_FIELDS.goal]:
+        args.goal || args["goal-id"] ? relationProperty(goalIds) : undefined
+    };
+    const filtered = Object.fromEntries(Object.entries(updates).filter(([, value]) => value !== undefined));
+    if (Object.keys(filtered).length > 0) updatePageProperties(reusableTask.id, filtered);
+    emitJson(taskCreateOrReuseResult("add-task", {
+      pageId: reusableTask.id,
+      title: reusableTask.title,
+      requestedTitle: title,
+      reusedExisting: true,
+      reuseReason: reusableTask.reuse_match?.reason || null,
+      updatesApplied: Object.keys(filtered).length > 0
+    }));
+    return;
+  }
 
   const payload = {
     parent: { data_source_id: b.databases.tasks.data_source_id },
@@ -470,21 +566,25 @@ export function cmdAddTask(args) {
       [TASK_FIELDS.dueDate]: dateProperty(dueDate),
       [TASK_FIELDS.nextDueAt]: dateProperty(nextDueAt),
       [TASK_FIELDS.reviewNotes]: richTextProperty(args.notes || ""),
-      [TASK_FIELDS.project]: relationProperty(resolveRelationArg("projects", args, "project", "project-id")),
-      [TASK_FIELDS.goal]: relationProperty(resolveRelationArg("goals", args, "goal", "goal-id"))
+      [TASK_FIELDS.project]: relationProperty(projectIds),
+      [TASK_FIELDS.goal]: relationProperty(goalIds)
     }
   };
 
   const out = notionRequest("POST", "/v1/pages", payload, true);
   kickMirrorSync();
-  emitJson({ ok: true, action: "add-task", page_id: out.id, title });
+  emitJson(taskCreateOrReuseResult("add-task", {
+    pageId: out.id,
+    title,
+    requestedTitle: title
+  }));
 }
 
 export function cmdCapture(args) {
   const b = board();
   const title = args.title || args._.join(" ");
   if (!title) throw new Error('usage: capture --title "..." [--project "..."] [--goal "..."]');
-  assertScheduleRange("capture", args.start, args.end);
+  const schedule = resolveScheduleRange("capture", args.start, args.end);
   const baseDate = normalizeDateArg(args.date);
 
   const repeatMode = inferRepeatModeFromShape({
@@ -530,8 +630,8 @@ export function cmdCapture(args) {
       [TASK_FIELDS.goal]: goalIds,
       [TASK_FIELDS.needsCalendar]: explicitNeedsCalendar,
       [TASK_FIELDS.schedulingMode]: args["scheduling-mode"] || null,
-      [TASK_FIELDS.scheduledStart]: args.start ? { start: args.start, end: null, time_zone: null } : null,
-      [TASK_FIELDS.scheduledEnd]: args.end ? { start: args.end, end: null, time_zone: null } : null,
+      [TASK_FIELDS.scheduledStart]: schedule.start ? { start: schedule.start, end: null, time_zone: null } : null,
+      [TASK_FIELDS.scheduledEnd]: schedule.end ? { start: schedule.end, end: null, time_zone: null } : null,
       [TASK_FIELDS.stage]: args.stage || null,
       [TASK_FIELDS.status]: args.status || null,
       [TASK_FIELDS.horizon]: args.horizon || null
@@ -540,7 +640,7 @@ export function cmdCapture(args) {
 
   const inferredHorizon = args.horizon || inferHorizon(draft);
   const inferredNeedsCalendar =
-    args.start && args.end
+    schedule.start && schedule.end
       ? true
       : (explicitNeedsCalendar ??
         inferNeedsCalendar({
@@ -564,12 +664,123 @@ export function cmdCapture(args) {
     args.status ||
     (inferredStage === "blocked"
       ? "blocked"
-      : args.start && args.end
+      : schedule.start && schedule.end
         ? "scheduled"
         : "todo");
-  const scheduledEvent = args.start && args.end ? createCalendarEvent(title, args.start, args.end) : null;
+  const reusableTask = duplicateReuseAllowed(args) ? null : findReusableTaskCandidate(title);
+  let scheduledEvent = null;
+  if (schedule.start && schedule.end && !reusableTask) {
+    scheduledEvent = createCalendarEvent(title, schedule.start, schedule.end);
+  }
   const inferredSchedulingMode = args["scheduling-mode"] || (scheduledEvent ? "flexible_block" : null);
   const inferredScheduleType = args["schedule-type"] || (scheduledEvent ? "soft" : null);
+
+  if (reusableTask) {
+    let calendarEventIdUpdate;
+    if (schedule.start && schedule.end) {
+      const refs = calendarRefsOf(reusableTask);
+      const reusableRef = refs.length === 1 ? refs[0] : null;
+      if (!reusableRef && refs.length > 1) deleteCalendarRefs(reusableTask);
+      scheduledEvent = reusableRef
+        ? updateCalendarEvent(reusableRef.event_id, reusableTask.title, schedule.start, schedule.end)
+        : createCalendarEvent(reusableTask.title, schedule.start, schedule.end);
+      calendarEventIdUpdate = encodeCalendarRefs([{
+        event_id: scheduledEvent.id,
+        start: schedule.start,
+        end: schedule.end
+      }]);
+    }
+
+    const updates = {
+      [TASK_FIELDS.stage]: selectProperty(inferredStage),
+      [TASK_FIELDS.status]: selectProperty(inferredStatus),
+      [TASK_FIELDS.horizon]: selectProperty(inferredHorizon),
+      [TASK_FIELDS.needsCalendar]: checkboxProperty(inferredNeedsCalendar),
+      [TASK_FIELDS.type]: args.type ? selectProperty(type) : undefined,
+      [TASK_FIELDS.repeatMode]: args["repeat-mode"] ? selectProperty(repeatMode) : undefined,
+      [TASK_FIELDS.priority]: args.priority ? selectProperty(args.priority) : undefined,
+      [TASK_FIELDS.schedulingMode]:
+        schedule.start && schedule.end
+          ? selectProperty(args["scheduling-mode"] || "flexible_block")
+          : args["scheduling-mode"]
+            ? selectProperty(args["scheduling-mode"])
+            : undefined,
+      [TASK_FIELDS.scheduleType]:
+        schedule.start && schedule.end
+          ? selectProperty(args["schedule-type"] || "soft")
+          : args["schedule-type"]
+            ? selectProperty(args["schedule-type"])
+            : undefined,
+      [TASK_FIELDS.estimatedMinutes]:
+        args["estimated-minutes"] === undefined ? undefined : numberProperty(args["estimated-minutes"]),
+      [TASK_FIELDS.energy]: args.energy ? selectProperty(args.energy) : undefined,
+      [TASK_FIELDS.cadence]: args.cadence ? selectProperty(args.cadence) : undefined,
+      [TASK_FIELDS.repeatWindow]: args["repeat-window"] ? selectProperty(args["repeat-window"]) : undefined,
+      [TASK_FIELDS.repeatTargetCount]:
+        args["repeat-target-count"] === undefined ? undefined : numberProperty(args["repeat-target-count"]),
+      [TASK_FIELDS.repeatProgress]:
+        args["repeat-progress"] === undefined ? undefined : numberProperty(args["repeat-progress"]),
+      [TASK_FIELDS.repeatDays]: args["repeat-days"] ? multiSelectProperty(repeatDays) : undefined,
+      [TASK_FIELDS.dueDate]: args["due-date"] ? dateProperty(dueDate) : undefined,
+      [TASK_FIELDS.nextDueAt]: args["next-due-at"] ? dateProperty(nextDueAt) : undefined,
+      [TASK_FIELDS.reviewNotes]: args.notes ? richTextProperty(args.notes) : undefined,
+      [TASK_FIELDS.project]:
+        args.project || args["project-id"] ? relationProperty(projectIds) : undefined,
+      [TASK_FIELDS.goal]:
+        args.goal || args["goal-id"] ? relationProperty(goalIds) : undefined,
+      [TASK_FIELDS.scheduledStart]: schedule.start ? dateProperty(schedule.start) : undefined,
+      [TASK_FIELDS.scheduledEnd]: schedule.end ? dateProperty(schedule.end) : undefined,
+      [TASK_FIELDS.calendarEventId]: calendarEventIdUpdate
+    };
+
+    updatePageProperties(reusableTask.id, updates);
+    const result = taskCreateOrReuseResult("capture", {
+      pageId: reusableTask.id,
+      title: reusableTask.title,
+      requestedTitle: title,
+      reusedExisting: true,
+      reuseReason: reusableTask.reuse_match?.reason || null,
+      calendarEventId: scheduledEvent?.id || null,
+      updatesApplied: true,
+      inferred: {
+        horizon: inferredHorizon,
+        stage: inferredStage,
+        status: inferredStatus,
+        needs_calendar: inferredNeedsCalendar,
+        repeat_mode: repeatMode,
+        repeat_window: args["repeat-window"] || null,
+        repeat_target_count: args["repeat-target-count"] === undefined ? null : Number(args["repeat-target-count"]),
+        repeat_days: repeatDays,
+        scheduling_mode:
+          (schedule.start && schedule.end ? args["scheduling-mode"] || "flexible_block" : args["scheduling-mode"]) || null,
+        schedule_type:
+          (schedule.start && schedule.end ? args["schedule-type"] || "soft" : args["schedule-type"]) || null,
+        project_ids: projectIds,
+        goal_ids: goalIds
+      }
+    });
+
+    if (verifyFlagEnabled(args)) {
+      result.verification = verifyTaskState(reusableTask.id, {
+        expected: scheduledEvent
+          ? {
+              archived: false,
+              scheduled: true,
+              linked: true,
+              schedule_synced: true,
+              calendar_event_id: scheduledEvent.id
+            }
+          : {
+              archived: false,
+              horizon: inferredHorizon
+            }
+      });
+      result.verified = result.verification.verified;
+    }
+
+    emitJson(result);
+    return;
+  }
 
   const payload = {
     parent: { data_source_id: b.databases.tasks.data_source_id },
@@ -596,20 +807,19 @@ export function cmdCapture(args) {
       [TASK_FIELDS.reviewNotes]: richTextProperty(args.notes || ""),
       [TASK_FIELDS.project]: relationProperty(projectIds),
       [TASK_FIELDS.goal]: relationProperty(goalIds),
-      [TASK_FIELDS.scheduledStart]: dateProperty(args.start || null),
-      [TASK_FIELDS.scheduledEnd]: dateProperty(args.end || null),
+      [TASK_FIELDS.scheduledStart]: dateProperty(schedule.start || null),
+      [TASK_FIELDS.scheduledEnd]: dateProperty(schedule.end || null),
       [TASK_FIELDS.calendarEventId]: richTextProperty(scheduledEvent?.id || "")
     }
   };
 
   const out = notionRequest("POST", "/v1/pages", payload, true);
   kickMirrorSync();
-  const result = {
-    ok: true,
-    action: "capture",
-    page_id: out.id,
+  const result = taskCreateOrReuseResult("capture", {
+    pageId: out.id,
     title,
-    calendar_event_id: scheduledEvent?.id || null,
+    requestedTitle: title,
+    calendarEventId: scheduledEvent?.id || null,
     inferred: {
       horizon: inferredHorizon,
       stage: inferredStage,
@@ -624,7 +834,7 @@ export function cmdCapture(args) {
       project_ids: projectIds,
       goal_ids: goalIds
     }
-  };
+  });
 
   if (verifyFlagEnabled(args)) {
     result.verification = verifyTaskState(out.id, {
@@ -649,9 +859,9 @@ export function cmdCapture(args) {
 
 export function cmdMoveTask(args) {
   const task = matchTask(args);
-  const hasScheduledStart = Boolean(args["scheduled-start"]);
-  const hasScheduledEnd = Boolean(args["scheduled-end"]);
-  assertScheduleRange("move-task", args["scheduled-start"], args["scheduled-end"]);
+  const schedule = resolveScheduleRange("move-task", args["scheduled-start"], args["scheduled-end"]);
+  const hasScheduledStart = Boolean(schedule.start);
+  const hasScheduledEnd = Boolean(schedule.end);
 
   let calendarEventIdUpdate;
   if (hasScheduledStart && hasScheduledEnd) {
@@ -659,12 +869,12 @@ export function cmdMoveTask(args) {
     const reusableRef = refs.length === 1 ? refs[0] : null;
     if (!reusableRef && refs.length > 1) deleteCalendarRefs(task);
     const event = reusableRef
-      ? updateCalendarEvent(reusableRef.event_id, task.title, args["scheduled-start"], args["scheduled-end"])
-      : createCalendarEvent(task.title, args["scheduled-start"], args["scheduled-end"]);
+      ? updateCalendarEvent(reusableRef.event_id, task.title, schedule.start, schedule.end)
+      : createCalendarEvent(task.title, schedule.start, schedule.end);
     calendarEventIdUpdate = encodeCalendarRefs([{
       event_id: event.id,
-      start: args["scheduled-start"],
-      end: args["scheduled-end"]
+      start: schedule.start,
+      end: schedule.end
     }]);
   }
 
@@ -673,8 +883,8 @@ export function cmdMoveTask(args) {
     [TASK_FIELDS.stage]: args.stage ? selectProperty(args.stage) : undefined,
     [TASK_FIELDS.status]: args.status ? selectProperty(args.status) : undefined,
     [TASK_FIELDS.dueDate]: args["due-date"] ? dateProperty(args["due-date"]) : undefined,
-    [TASK_FIELDS.scheduledStart]: args["scheduled-start"] ? dateProperty(args["scheduled-start"]) : undefined,
-    [TASK_FIELDS.scheduledEnd]: args["scheduled-end"] ? dateProperty(args["scheduled-end"]) : undefined,
+    [TASK_FIELDS.scheduledStart]: hasScheduledStart ? dateProperty(schedule.start) : undefined,
+    [TASK_FIELDS.scheduledEnd]: hasScheduledEnd ? dateProperty(schedule.end) : undefined,
     [TASK_FIELDS.needsCalendar]:
       hasScheduledStart && hasScheduledEnd
         ? checkboxProperty(true)
@@ -695,8 +905,8 @@ export function cmdMoveTask(args) {
       stage: args.stage || null,
       status: args.status || null,
       due_date: args["due-date"] || null,
-      scheduled_start: args["scheduled-start"] || null,
-      scheduled_end: args["scheduled-end"] || null,
+      scheduled_start: schedule.start || null,
+      scheduled_end: schedule.end || null,
       needs_calendar: args["needs-calendar"] ?? null,
       scheduling_mode: args["scheduling-mode"] || null,
       schedule_type: args["schedule-type"] || null
@@ -1036,20 +1246,20 @@ export function cmdDeleteTask(args) {
 
 export function cmdSetSchedule(args) {
   const task = matchTask(args);
-  if (!args.start || !args.end) throw new Error('usage: set-schedule --match "..." --start <ISO> --end <ISO>');
-  assertScheduleRange("set-schedule", args.start, args.end, { requireBoth: true });
+  if (!args.start) throw new Error('usage: set-schedule --match "..." --start <ISO|YYYY-MM-DD> [--end <ISO|YYYY-MM-DD>]');
+  const schedule = resolveScheduleRange("set-schedule", args.start, args.end, { requireBoth: true });
   const existingRefs = args["calendar-event-id"] !== undefined
-    ? [{ event_id: args["calendar-event-id"], start: args.start, end: args.end }]
+    ? [{ event_id: args["calendar-event-id"], start: schedule.start, end: schedule.end }]
     : calendarRefsOf(task);
   const reusableRef = existingRefs.length === 1 ? existingRefs[0] : null;
   if (!reusableRef && existingRefs.length > 1) deleteCalendarRefs(task);
   const event = reusableRef
-    ? updateCalendarEvent(reusableRef.event_id, task.title, args.start, args.end)
-    : createCalendarEvent(task.title, args.start, args.end);
-  const stored = eventStorageForRefs([{ event_id: event.id, start: args.start, end: args.end }]);
+    ? updateCalendarEvent(reusableRef.event_id, task.title, schedule.start, schedule.end)
+    : createCalendarEvent(task.title, schedule.start, schedule.end);
+  const stored = eventStorageForRefs([{ event_id: event.id, start: schedule.start, end: schedule.end }]);
   updatePageProperties(task.id, {
-    [TASK_FIELDS.scheduledStart]: dateProperty(stored.first?.start || args.start),
-    [TASK_FIELDS.scheduledEnd]: dateProperty(stored.first?.end || args.end),
+    [TASK_FIELDS.scheduledStart]: dateProperty(stored.first?.start || schedule.start),
+    [TASK_FIELDS.scheduledEnd]: dateProperty(stored.first?.end || schedule.end),
     [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
     [TASK_FIELDS.schedulingMode]:
       args["scheduling-mode"] !== undefined
@@ -1068,8 +1278,8 @@ export function cmdSetSchedule(args) {
     mode: reusableRef ? "updated-existing-event" : "created-new-event",
     page_id: task.id,
     task: task.title,
-    start: args.start,
-    end: args.end,
+    start: schedule.start,
+    end: schedule.end,
     calendar_event_id: event.id
   };
 
@@ -1263,20 +1473,20 @@ export function cmdRemoveSchedule(args) {
 
 export function cmdRescheduleTask(args) {
   const task = matchTask(args);
-  if (!args.start || !args.end) throw new Error('usage: reschedule-task --match "..." --start <ISO> --end <ISO>');
-  assertScheduleRange("reschedule-task", args.start, args.end, { requireBoth: true });
+  if (!args.start) throw new Error('usage: reschedule-task --match "..." --start <ISO|YYYY-MM-DD> [--end <ISO|YYYY-MM-DD>]');
+  const schedule = resolveScheduleRange("reschedule-task", args.start, args.end, { requireBoth: true });
 
   const existingRefs = calendarRefsOf(task);
   const reusableRef = existingRefs.length === 1 ? existingRefs[0] : null;
   if (!reusableRef && existingRefs.length > 1) deleteCalendarRefs(task);
   const event = reusableRef
-    ? updateCalendarEvent(reusableRef.event_id, task.title, args.start, args.end)
-    : createCalendarEvent(task.title, args.start, args.end);
-  const stored = eventStorageForRefs([{ event_id: event.id, start: args.start, end: args.end }]);
+    ? updateCalendarEvent(reusableRef.event_id, task.title, schedule.start, schedule.end)
+    : createCalendarEvent(task.title, schedule.start, schedule.end);
+  const stored = eventStorageForRefs([{ event_id: event.id, start: schedule.start, end: schedule.end }]);
 
   updatePageProperties(task.id, {
-    [TASK_FIELDS.scheduledStart]: dateProperty(stored.first?.start || args.start),
-    [TASK_FIELDS.scheduledEnd]: dateProperty(stored.first?.end || args.end),
+    [TASK_FIELDS.scheduledStart]: dateProperty(stored.first?.start || schedule.start),
+    [TASK_FIELDS.scheduledEnd]: dateProperty(stored.first?.end || schedule.end),
     [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
     [TASK_FIELDS.schedulingMode]:
       args["scheduling-mode"] !== undefined
@@ -1290,8 +1500,8 @@ export function cmdRescheduleTask(args) {
       ...task,
       properties: {
         ...task.properties,
-        [TASK_FIELDS.scheduledStart]: args.start,
-        [TASK_FIELDS.scheduledEnd]: args.end
+        [TASK_FIELDS.scheduledStart]: schedule.start,
+        [TASK_FIELDS.scheduledEnd]: schedule.end
       }
     })),
     [TASK_FIELDS.calendarEventId]: encodeCalendarRefs(stored.refs)
@@ -1303,25 +1513,25 @@ export function cmdRescheduleTask(args) {
     mode: reusableRef ? "updated-existing-event" : "created-new-event",
     page_id: task.id,
     task: task.title,
-    start: args.start,
-    end: args.end,
+    start: schedule.start,
+    end: schedule.end,
     calendar_event_id: event.id
   }, null, 2));
 }
 
 export function cmdLinkSchedule(args) {
   const task = matchTask(args);
-  if (!args["event-id"]) throw new Error('usage: link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start <ISO> --end <ISO>');
-  if (!args.start || !args.end) throw new Error('usage: link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start <ISO> --end <ISO>');
-  assertScheduleRange("link-schedule", args.start, args.end, { requireBoth: true });
+  if (!args["event-id"]) throw new Error('usage: link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start <ISO|YYYY-MM-DD> [--end <ISO|YYYY-MM-DD>]');
+  if (!args.start) throw new Error('usage: link-schedule --match "..." | --page-id <PAGE_ID> --event-id <EVENT_ID> --start <ISO|YYYY-MM-DD> [--end <ISO|YYYY-MM-DD>]');
+  const schedule = resolveScheduleRange("link-schedule", args.start, args.end, { requireBoth: true });
 
   updatePageProperties(task.id, {
-    [TASK_FIELDS.scheduledStart]: dateProperty(args.start),
-    [TASK_FIELDS.scheduledEnd]: dateProperty(args.end),
+    [TASK_FIELDS.scheduledStart]: dateProperty(schedule.start),
+    [TASK_FIELDS.scheduledEnd]: dateProperty(schedule.end),
     [TASK_FIELDS.calendarEventId]: encodeCalendarRefs([{
       event_id: args["event-id"],
-      start: args.start,
-      end: args.end
+      start: schedule.start,
+      end: schedule.end
     }]),
     [TASK_FIELDS.needsCalendar]: checkboxProperty(true),
     [TASK_FIELDS.schedulingMode]:
@@ -1336,8 +1546,8 @@ export function cmdLinkSchedule(args) {
       ...task,
       properties: {
         ...task.properties,
-        [TASK_FIELDS.scheduledStart]: args.start,
-        [TASK_FIELDS.scheduledEnd]: args.end,
+        [TASK_FIELDS.scheduledStart]: schedule.start,
+        [TASK_FIELDS.scheduledEnd]: schedule.end,
         [TASK_FIELDS.needsCalendar]: true
       }
     }))
@@ -1348,8 +1558,8 @@ export function cmdLinkSchedule(args) {
     action: "link-schedule",
     page_id: task.id,
     task: task.title,
-    start: args.start,
-    end: args.end,
+    start: schedule.start,
+    end: schedule.end,
     calendar_event_id: args["event-id"]
   }, null, 2));
 }

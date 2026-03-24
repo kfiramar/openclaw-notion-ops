@@ -305,6 +305,95 @@ export function matchingRows(rows, query, { exact = false } = {}) {
   return rows.filter((row) => normalize(row.title).includes(q));
 }
 
+function normalizeReuseToken(token) {
+  let value = normalize(token).replace(/[^a-z0-9]+/g, "");
+  if (!value) return "";
+  if (value.endsWith("ies") && value.length > 4) value = `${value.slice(0, -3)}y`;
+  else if (value.endsWith("ing") && value.length > 5) value = value.slice(0, -3);
+  else if (value.endsWith("ed") && value.length > 4) value = value.slice(0, -2);
+  else if (value.endsWith("es") && value.length > 4) value = value.slice(0, -2);
+  else if (value.endsWith("s") && value.length > 3 && !value.endsWith("ss")) value = value.slice(0, -1);
+  if (/([a-z0-9])\1$/.test(value)) value = value.slice(0, -1);
+  return value;
+}
+
+function reuseTokens(title) {
+  return normalize(title)
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .map(normalizeReuseToken)
+    .filter(Boolean);
+}
+
+function hasSameTokenSet(a, b) {
+  if (a.length !== b.length || a.length === 0) return false;
+  const counts = new Map();
+  for (const token of a) counts.set(token, (counts.get(token) || 0) + 1);
+  for (const token of b) {
+    if (!counts.has(token)) return false;
+    const next = counts.get(token) - 1;
+    if (next === 0) counts.delete(token);
+    else counts.set(token, next);
+  }
+  return counts.size === 0;
+}
+
+function subsetReuseMatch(a, b) {
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  if (shorter.length < 2) return false;
+  return shorter.every((token) => longer.includes(token));
+}
+
+function scoreReusableTitleMatch(queryTitle, taskTitle) {
+  const exactQuery = normalize(queryTitle);
+  const exactTask = normalize(taskTitle);
+  if (!exactQuery || !exactTask) return null;
+  if (exactQuery === exactTask) return { score: 100, reason: "exact-title" };
+
+  const queryTokens = reuseTokens(queryTitle);
+  const taskTokens = reuseTokens(taskTitle);
+  if (queryTokens.length === 0 || taskTokens.length === 0) return null;
+
+  const queryStem = queryTokens.join(" ");
+  const taskStem = taskTokens.join(" ");
+  if (queryStem === taskStem) return { score: 95, reason: "stemmed-title" };
+  if (hasSameTokenSet(queryTokens, taskTokens)) return { score: 90, reason: "token-set" };
+  if (subsetReuseMatch(queryTokens, taskTokens)) return { score: 80, reason: "token-subset" };
+
+  const shorterStem = queryStem.length <= taskStem.length ? queryStem : taskStem;
+  const longerStem = queryStem.length <= taskStem.length ? taskStem : queryStem;
+  if (shorterStem.length >= 8 && longerStem.includes(shorterStem)) {
+    return { score: 70, reason: "stem-contains" };
+  }
+
+  return null;
+}
+
+export function findReusableTaskCandidate(title, { includeDone = false } = {}) {
+  if (!title) return null;
+  const rows = liveRows("tasks");
+  const candidates = (rows.length > 0 ? rows : mirrorRows("tasks"))
+    .filter((task) => !isArchivedTask(task))
+    .filter((task) => includeDone || !isDoneTask(task))
+    .map((task) => ({ task, match: scoreReusableTitleMatch(title, task.title) }))
+    .filter((entry) => entry.match);
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    if (b.match.score !== a.match.score) return b.match.score - a.match.score;
+    return sortRowsByRecency([a.task, b.task], "desc")[0].id === a.task.id ? -1 : 1;
+  });
+
+  const best = candidates[0];
+  if (!best || best.match.score < 80) return null;
+  const ambiguous = candidates.filter((entry) => entry !== best && entry.match.score === best.match.score);
+  if (ambiguous.length > 0) return null;
+  return {
+    ...best.task,
+    reuse_match: best.match
+  };
+}
+
 export function selectRow(rows, query, label, options = {}) {
   const matches = matchingRows(rows, query, options);
   if (matches.length === 1) return matches[0];
