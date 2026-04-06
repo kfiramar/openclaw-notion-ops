@@ -18,6 +18,7 @@ import { die, extractPageTitle, loadJson, normalizePropertyValue, resolveRuntime
 
 const FAST_MIRROR_SYNC_SCRIPT = fileURLToPath(new URL("./fast-sync.mjs", import.meta.url));
 const FULL_MIRROR_DEFAULT_WAIT_MS = 5000;
+const FAST_SYNC_PENDING_FILE = ".fast-sync-pending";
 
 function resolveCommandBin(name, envValue, absoluteCandidates = []) {
   const candidates = [
@@ -59,12 +60,24 @@ function resolveNodeBin() {
 
 const NODE_BIN = resolveNodeBin();
 const FAST_MIRROR_SYNC_MATCH = FAST_MIRROR_SYNC_SCRIPT;
+const RUNTIME_NOTION_API = resolveRuntimePath(NOTION_API, [
+  translateOpenClawPath(NOTION_API, OPENCLAW_CONTAINER_ROOT, OPENCLAW_HOST_ROOT),
+  translateOpenClawPath(NOTION_API, OPENCLAW_HOST_ROOT, OPENCLAW_CONTAINER_ROOT)
+]);
+const RUNTIME_MIRROR_SYNC = resolveRuntimePath(MIRROR_SYNC, [
+  translateOpenClawPath(MIRROR_SYNC, OPENCLAW_CONTAINER_ROOT, OPENCLAW_HOST_ROOT),
+  translateOpenClawPath(MIRROR_SYNC, OPENCLAW_HOST_ROOT, OPENCLAW_CONTAINER_ROOT)
+]);
+const RUNTIME_MIRROR_ROOT = resolveRuntimePath(MIRROR_ROOT, [
+  translateOpenClawPath(MIRROR_ROOT, OPENCLAW_CONTAINER_ROOT, OPENCLAW_HOST_ROOT),
+  translateOpenClawPath(MIRROR_ROOT, OPENCLAW_HOST_ROOT, OPENCLAW_CONTAINER_ROOT)
+]);
 const NOTION_COMMAND = DOCKER_BIN
   ? { bin: DOCKER_BIN, prefix: ["exec", CONTAINER, "node", NOTION_API] }
-  : { bin: NODE_BIN, prefix: [NOTION_API] };
+  : { bin: NODE_BIN, prefix: [RUNTIME_NOTION_API] };
 const FULL_SYNC_COMMAND = DOCKER_BIN
   ? { bin: DOCKER_BIN, args: ["exec", CONTAINER, "node", MIRROR_SYNC, "--root", MIRROR_ROOT] }
-  : { bin: NODE_BIN, args: [MIRROR_SYNC, "--root", MIRROR_ROOT] };
+  : { bin: NODE_BIN, args: [RUNTIME_MIRROR_SYNC, "--root", RUNTIME_MIRROR_ROOT] };
 
 function normalizePage(page) {
   return {
@@ -147,6 +160,24 @@ function resolveBoardPath(filePath) {
     translateOpenClawPath(filePath, OPENCLAW_CONTAINER_ROOT, OPENCLAW_HOST_ROOT),
     translateOpenClawPath(filePath, OPENCLAW_HOST_ROOT, OPENCLAW_CONTAINER_ROOT)
   ]);
+}
+
+function fastSyncPendingPath() {
+  return path.join(resolveBoardPath(MIRROR_ROOT), FAST_SYNC_PENDING_FILE);
+}
+
+function markFastSyncPending() {
+  const filePath = fastSyncPendingPath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${Date.now()}\n`, "utf8");
+}
+
+export function clearFastSyncPending() {
+  fs.rmSync(fastSyncPendingPath(), { force: true });
+}
+
+export function fastSyncPending() {
+  return fs.existsSync(fastSyncPendingPath());
 }
 
 function ensureWritableMirrorDir(filePath) {
@@ -277,6 +308,7 @@ export function runMirrorSync({ full = false, waitMs } = {}) {
 
 export function kickMirrorSync() {
   if (DISABLE_BACKGROUND_SYNC) return;
+  markFastSyncPending();
   if (fastMirrorSyncRunning()) return;
   try {
     const child = spawn(NODE_BIN, [FAST_MIRROR_SYNC_SCRIPT], {

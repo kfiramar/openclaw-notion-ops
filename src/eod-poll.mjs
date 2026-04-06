@@ -2,19 +2,22 @@ import { TASK_FIELDS, TELEGRAM_POLL_ACCOUNT, TELEGRAM_POLL_TARGET } from "./conf
 import { deleteCalendarEvent } from "./calendar.mjs";
 import { dateStart, logCompletion } from "./history.mjs";
 import { compactTaskLabel, includeInHumanSummary } from "./human-summary.mjs";
-import { archivePage, getPage, updatePageProperties } from "./notion.mjs";
+import { archivePage, getPage, queryDataSourceRows, updatePageProperties } from "./notion.mjs";
 import {
   MAX_TELEGRAM_POLL_OPTIONS,
   generateBatchId,
   generatePollRunId,
   listPollStates,
   normalizeAccountId,
+  releaseLock,
   readPollAnswerEvents,
   readPollState,
+  tryAcquireBatchLock,
   writePollState
 } from "./polls.mjs";
 import { sendTelegramMessage, sendTelegramPoll, stopTelegramPoll } from "./telegram.mjs";
 import {
+  board,
   calendarRefsOf,
   carryForwardProperties,
   clearCalendarProperties,
@@ -35,7 +38,18 @@ function emitJson(payload) {
 }
 
 function deleteCalendarRefs(task) {
-  const refs = calendarRefsOf(task);
+  return deleteCalendarRefList(calendarRefSnapshot(task));
+}
+
+function calendarRefSnapshot(task) {
+  return calendarRefsOf(task).map((ref) => ({
+    event_id: ref.event_id,
+    start: ref.start || null,
+    end: ref.end || null
+  }));
+}
+
+function deleteCalendarRefList(refs) {
   for (const ref of refs) {
     if (ref.event_id) deleteCalendarEvent(ref.event_id);
   }
@@ -81,13 +95,20 @@ function isEodRelevantTask(task, date) {
   if (isAutoCompleteWhenScheduledTask(task)) return false;
 
   const horizon = task.properties[TASK_FIELDS.horizon];
+  const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
   if (horizon === "today") return true;
+  if (dueDate === date) return true;
   if (scheduledTouchesDate(task, date)) return true;
   return false;
 }
 
+function freshTaskRows() {
+  const dataSourceId = board().databases?.tasks?.data_source_id || null;
+  return dataSourceId ? queryDataSourceRows(dataSourceId) : mirrorRows("tasks");
+}
+
 export function eodPollCandidates(date) {
-  return mirrorRows("tasks")
+  return freshTaskRows()
     .filter((task) => isEodRelevantTask(task, date))
     .sort(compareCandidates);
 }
@@ -105,6 +126,43 @@ function buildPollBatches(date, tasks, { maxOptions = MAX_TELEGRAM_POLL_OPTIONS 
     priority: task.properties[TASK_FIELDS.priority] || null
   }));
 
+  if (rows.length === 1) {
+    const [row] = rows;
+    return {
+      ok: true,
+      action: "build-eod-poll",
+      date,
+      run_id: runId,
+      count: 1,
+      polls: [
+        {
+          batch_id: generateBatchId(runId, 0),
+          batch_index: 0,
+          kind: "single_task_list_fallback",
+          allows_multiple_answers: false,
+          question: "What did you finish today?",
+          options: [
+            {
+              index: 0,
+              ...row,
+              compact_label: row.compact_label,
+              task_label: row.compact_label,
+              outcome: "selected"
+            },
+            {
+              index: 1,
+              page_id: null,
+              title: "Nothing from this list",
+              compact_label: "Nothing from this list",
+              task_label: null,
+              outcome: "none"
+            }
+          ]
+        }
+      ]
+    };
+  }
+
   const polls = [];
   for (let offset = 0; offset < rows.length; offset += maxOptions) {
     const slice = rows.slice(offset, offset + maxOptions);
@@ -113,12 +171,16 @@ function buildPollBatches(date, tasks, { maxOptions = MAX_TELEGRAM_POLL_OPTIONS 
     polls.push({
       batch_id: batchId,
       batch_index: batchIndex,
+      kind: "task_checklist",
+      allows_multiple_answers: true,
       question: rows.length > maxOptions
         ? `What did you finish today? (${batchIndex + 1}/${Math.ceil(rows.length / maxOptions)})`
         : "What did you finish today?",
       options: slice.map((row, index) => ({
         index,
-        ...row
+        ...row,
+        task_label: row.compact_label,
+        outcome: "selected"
       }))
     });
   }
@@ -169,15 +231,30 @@ function selectedIndexesFromPollResult(poll) {
     .map((entry) => entry.index);
 }
 
+function selectedIndexesForState(state, pollResult) {
+  const pollSelected = pollResult ? selectedIndexesFromPollResult(pollResult) : [];
+  if (pollSelected.length > 0) return pollSelected;
+  if ((state.latest_selected_indexes || []).length > 0) return state.latest_selected_indexes || [];
+  if (Number(pollResult?.total_voter_count || 0) > 0) return pollSelected;
+  return state.latest_selected_indexes || [];
+}
+
 function buildApplySummary(state, selectedIndexes) {
   const selected = new Set(selectedIndexes);
-  const selectedOptions = state.options.filter((option) => selected.has(option.index));
-  const unselectedOptions = state.options.filter((option) => !selected.has(option.index));
+  const optionLabel = (option) => option.task_label || option.label;
+  const isSingleTaskListFallback = state.kind === "single_task_list_fallback";
+  const actualOptions = state.options.filter((option) => option.page_id);
+  const selectedOptions = isSingleTaskListFallback
+    ? actualOptions.filter((option) => selected.has(option.index) && option.outcome === "selected")
+    : actualOptions.filter((option) => selected.has(option.index));
+  const unselectedOptions = isSingleTaskListFallback
+    ? (selectedOptions.length > 0 ? [] : actualOptions)
+    : actualOptions.filter((option) => !selected.has(option.index));
   return {
     selected_page_ids: selectedOptions.map((option) => option.page_id),
     unselected_page_ids: unselectedOptions.map((option) => option.page_id),
-    selected_labels: selectedOptions.map((option) => option.label),
-    unselected_labels: unselectedOptions.map((option) => option.label)
+    selected_labels: selectedOptions.map(optionLabel),
+    unselected_labels: unselectedOptions.map(optionLabel)
   };
 }
 
@@ -282,7 +359,7 @@ function applyDoneOutcome(task, date) {
   const repeatProgress = Number(task.properties[TASK_FIELDS.repeatProgress] || 0);
 
   if (repeatMode === "cadence" && cadence && cadence !== "none") {
-    deleteCalendarRefs(task);
+    const refs = calendarRefSnapshot(task);
     const next = plusCadence(date, cadence);
     logCompletion(task, {
       completed_at: date,
@@ -299,11 +376,12 @@ function applyDoneOutcome(task, date) {
       [TASK_FIELDS.stage]: selectProperty("active"),
       ...clearCalendarProperties()
     });
+    deleteCalendarRefList(refs);
     return { page_id: task.id, task: task.title, mode: "recurring-roll-forward", next_due: next };
   }
 
   if (repeatMode === "manual_repeat") {
-    deleteCalendarRefs(task);
+    const refs = calendarRefSnapshot(task);
     if (repeatTargetCount > 0) {
       const nextProgress = Math.min(repeatTargetCount, repeatProgress + 1);
       const reachedTarget = nextProgress >= repeatTargetCount;
@@ -321,6 +399,7 @@ function applyDoneOutcome(task, date) {
         [TASK_FIELDS.stage]: selectProperty(reachedTarget ? "done" : task.properties[TASK_FIELDS.stage] || "active"),
         ...clearCalendarProperties()
       });
+      deleteCalendarRefList(refs);
       return {
         page_id: task.id,
         task: task.title,
@@ -342,6 +421,7 @@ function applyDoneOutcome(task, date) {
       [TASK_FIELDS.nextDueAt]: dateProperty(null),
       ...clearCalendarProperties()
     });
+    deleteCalendarRefList(refs);
     return { page_id: task.id, task: task.title, mode: "manual-repeat-done" };
   }
 
@@ -350,8 +430,12 @@ function applyDoneOutcome(task, date) {
     mode: "eod-poll-archived",
     source: "eod-poll"
   });
-  deleteCalendarRefs(task);
+  const refs = calendarRefSnapshot(task);
+  updatePageProperties(task.id, {
+    ...clearCalendarProperties()
+  });
   archivePage(task.id);
+  deleteCalendarRefList(refs);
   return { page_id: task.id, task: task.title, mode: "archived" };
 }
 
@@ -361,8 +445,9 @@ function applyUncheckedOutcome(task, carryTo) {
     Boolean(dateStart(task.properties[TASK_FIELDS.scheduledStart])) ||
     Boolean(dateStart(task.properties[TASK_FIELDS.scheduledEnd])) ||
     calendarRefsOf(task).length > 0;
-  if (hadCalendarState) deleteCalendarRefs(task);
+  const refs = hadCalendarState ? calendarRefSnapshot(task) : [];
   updatePageProperties(task.id, carryForwardProperties(carryTo, nextMissCount));
+  if (hadCalendarState) deleteCalendarRefList(refs);
   return {
     page_id: task.id,
     task: task.title,
@@ -371,6 +456,20 @@ function applyUncheckedOutcome(task, carryTo) {
     miss_count: nextMissCount,
     cleared_calendar_state: hadCalendarState
   };
+}
+
+function processedPageIds(applyResult) {
+  const ids = new Set();
+  for (const row of applyResult?.selected_applied || []) {
+    if (row?.page_id) ids.add(row.page_id);
+  }
+  for (const row of applyResult?.unselected_applied || []) {
+    if (row?.page_id) ids.add(row.page_id);
+  }
+  for (const row of applyResult?.skipped || []) {
+    if (row?.page_id) ids.add(row.page_id);
+  }
+  return ids;
 }
 
 function parseIdList(value) {
@@ -443,7 +542,7 @@ export async function cmdSendEodPoll(args) {
           chatId,
           question: poll.question,
           options: optionLabels,
-          allowsMultipleAnswers: true,
+          allowsMultipleAnswers: poll.allows_multiple_answers !== false,
           isAnonymous: false
         });
 
@@ -455,6 +554,7 @@ export async function cmdSendEodPoll(args) {
       run_id: build.run_id,
       batch_id: poll.batch_id,
       batch_index: poll.batch_index,
+      kind: poll.kind || "task_checklist",
       account_id: accountId,
       chat_id: sentPoll.chat_id,
       message_id: sentPoll.message_id,
@@ -464,7 +564,10 @@ export async function cmdSendEodPoll(args) {
         index,
         page_id: option.page_id,
         title: option.title,
-        label: option.compact_label,
+        label: option.task_label || option.compact_label,
+        poll_label: option.compact_label,
+        task_label: option.task_label || option.compact_label,
+        outcome: option.outcome || "selected",
         repeat_mode: option.repeat_mode,
         scheduled_start: option.scheduled_start,
         scheduled_end: option.scheduled_end
@@ -480,7 +583,18 @@ export async function cmdSendEodPoll(args) {
       poll_result: null,
       apply_result: null
     };
-    writePollState(state);
+    try {
+      writePollState(state);
+    } catch (error) {
+      if (args["dry-run"] !== true) {
+        await stopTelegramPoll({
+          accountId,
+          chatId: sentPoll.chat_id,
+          messageId: sentPoll.message_id
+        }).catch(() => null);
+      }
+      throw error;
+    }
     batchIds.push(state.batch_id);
     sent.push({
       batch_id: state.batch_id,
@@ -593,9 +707,7 @@ async function closeAndApplyState(
     }
   }
 
-  const selectedIndexes = finalPoll
-    ? selectedIndexesFromPollResult(finalPoll)
-    : state.latest_selected_indexes || [];
+  const selectedIndexes = selectedIndexesForState(state, finalPoll);
   const summary = !state.first_interaction_at && selectedIndexes.length === 0
     ? {
         selected_page_ids: [],
@@ -605,7 +717,7 @@ async function closeAndApplyState(
       }
     : buildApplySummary(state, selectedIndexes);
 
-  let applyResult = null;
+  let applyResult = state.apply_result || null;
   if (!applyMutations) {
     applyResult = {
       preview_only: true,
@@ -615,26 +727,81 @@ async function closeAndApplyState(
       unselected_labels: summary.unselected_labels
     };
   } else if (summary.selected_page_ids.length > 0 || summary.unselected_page_ids.length > 0) {
-    const selectedApplied = [];
-    const unselectedApplied = [];
-    const skipped = [];
+    const selectedApplied = Array.isArray(applyResult?.selected_applied) ? [...applyResult.selected_applied] : [];
+    const unselectedApplied = Array.isArray(applyResult?.unselected_applied) ? [...applyResult.unselected_applied] : [];
+    const skipped = Array.isArray(applyResult?.skipped) ? [...applyResult.skipped] : [];
+    const doneIds = processedPageIds({ selected_applied: selectedApplied, unselected_applied: unselectedApplied, skipped });
+
+    const applyingState = {
+      ...state,
+      status: "applying",
+      closed_at: now,
+      mutation_mode: applyMutations ? "apply" : "preview",
+      poll_result: finalPoll || null,
+      selected_indexes: selectedIndexes,
+      ...summary,
+      apply_result: {
+        selected_applied: selectedApplied,
+        unselected_applied: unselectedApplied,
+        skipped
+      }
+    };
+    writePollState(applyingState);
 
     for (const pageId of summary.selected_page_ids) {
+      if (doneIds.has(pageId)) continue;
       const task = getPage(pageId);
       if (task.archived === true || isDoneTask(task)) {
         skipped.push({ page_id: pageId, task: task.title, reason: "already-done" });
+        doneIds.add(pageId);
+        writePollState({
+          ...applyingState,
+          apply_result: {
+            selected_applied: selectedApplied,
+            unselected_applied: unselectedApplied,
+            skipped
+          }
+        });
         continue;
       }
       selectedApplied.push(applyDoneOutcome(task, state.date));
+      doneIds.add(pageId);
+      writePollState({
+        ...applyingState,
+        apply_result: {
+          selected_applied: selectedApplied,
+          unselected_applied: unselectedApplied,
+          skipped
+        }
+      });
     }
 
     for (const pageId of summary.unselected_page_ids) {
+      if (doneIds.has(pageId)) continue;
       const task = getPage(pageId);
       if (task.archived === true || isDoneTask(task)) {
         skipped.push({ page_id: pageId, task: task.title, reason: "already-done" });
+        doneIds.add(pageId);
+        writePollState({
+          ...applyingState,
+          apply_result: {
+            selected_applied: selectedApplied,
+            unselected_applied: unselectedApplied,
+            skipped
+          }
+        });
         continue;
       }
       unselectedApplied.push(applyUncheckedOutcome(task, carryTo));
+      doneIds.add(pageId);
+      writePollState({
+        ...applyingState,
+        apply_result: {
+          selected_applied: selectedApplied,
+          unselected_applied: unselectedApplied,
+          skipped
+        }
+      });
     }
 
     applyResult = {
@@ -678,6 +845,10 @@ async function processState(
     return maybeSendFollowUp(state, { now });
   }
 
+  if (state.status === "applying") {
+    return closeAndApplyState(state, { carryTo, now, applyMutations });
+  }
+
   if (state.first_interaction_at && Number.isFinite(closeTs) && Date.parse(now) >= closeTs) {
     return closeAndApplyState(state, { carryTo, now, applyMutations });
   }
@@ -688,6 +859,24 @@ async function processState(
 
   writePollState(state);
   return state;
+}
+
+async function processStateSafely(
+  rawState,
+  { carryTo = "this week", now = nowIso(), applyMutations = true } = {}
+) {
+  const lockPath = tryAcquireBatchLock(rawState.batch_id);
+  if (!lockPath) {
+    return {
+      ...rawState,
+      lock_status: "busy"
+    };
+  }
+  try {
+    return await processState(rawState, { carryTo, now, applyMutations });
+  } finally {
+    releaseLock(lockPath);
+  }
 }
 
 async function waitForPollResolution(
@@ -714,12 +903,20 @@ async function waitForPollResolution(
   while (Date.now() <= deadline) {
     const batches = [];
     for (const batchId of batchIds) {
-      const state = await processState(readPollState(batchId), {
-        carryTo,
-        now: nowIso(),
-        applyMutations
-      });
-      batches.push(summarizeState(state));
+      try {
+        const state = await processStateSafely(readPollState(batchId), {
+          carryTo,
+          now: nowIso(),
+          applyMutations
+        });
+        batches.push(summarizeState(state));
+      } catch (error) {
+        batches.push({
+          batch_id: batchId,
+          status: "error",
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
 
     if (batches.every((state) => isResolvedForWatch(state, applyMutations))) {
@@ -751,17 +948,27 @@ export async function cmdProcessEodPolls(args) {
   const states = batchId
     ? [readPollState(batchId)]
     : listPollStates({}).filter((state) =>
-        ["sent", "active"].includes(state.status) ||
+        ["sent", "active", "applying"].includes(state.status) ||
         (state.status === "applied" && !state.follow_up_sent_at)
       );
 
   const processed = [];
   for (const rawState of states) {
-    const state = await processState(rawState, { carryTo, now, applyMutations });
-    processed.push({
-      ...summarizeState(state),
-      mutation_mode: state.mutation_mode || (applyMutations ? "apply" : "preview")
-    });
+    try {
+      const state = await processStateSafely(rawState, { carryTo, now, applyMutations });
+      processed.push({
+        ...summarizeState(state),
+        lock_status: state.lock_status || null,
+        mutation_mode: state.mutation_mode || (applyMutations ? "apply" : "preview")
+      });
+    } catch (error) {
+      processed.push({
+        batch_id: rawState.batch_id,
+        status: "error",
+        mutation_mode: applyMutations ? "apply" : "preview",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 
   emitJson({

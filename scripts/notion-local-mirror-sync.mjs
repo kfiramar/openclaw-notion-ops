@@ -336,13 +336,29 @@ async function atomicWrite(root, buildFn, owner = null) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const staging = path.join(root, `.staging-${timestamp}`);
   const current = path.join(root, "current");
+  const previous = path.join(root, ".previous-current");
   await fs.rm(staging, { recursive: true, force: true });
+  await fs.rm(previous, { recursive: true, force: true });
   await ensureDir(staging);
   await applyOwnershipRecursive(staging, owner);
   await buildFn(staging);
   await applyOwnershipRecursive(staging, owner);
-  await fs.rm(current, { recursive: true, force: true });
-  await fs.rename(staging, current);
+  try {
+    await fs.rename(current, previous);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  try {
+    await fs.rename(staging, current);
+  } catch (error) {
+    try {
+      await fs.rename(previous, current);
+    } catch {
+      // best-effort rollback
+    }
+    throw error;
+  }
+  await fs.rm(previous, { recursive: true, force: true });
   await applyOwnershipRecursive(current, owner);
   await cleanupStagingDirs(root);
 }

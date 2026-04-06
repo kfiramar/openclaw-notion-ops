@@ -53,6 +53,14 @@ export function batchStatePath(batchId) {
   return path.join(pollStateRoot(), `${batchId}.json`);
 }
 
+export function batchLockPath(batchId) {
+  return path.join(pollStateRoot(), `${batchId}.lock`);
+}
+
+export function telegramPollLockPath(pollId) {
+  return path.join(telegramPollHistoryRoot(), `${pollId}.lock`);
+}
+
 export function generatePollRunId(date) {
   return `eod-${date}-${Date.now()}`;
 }
@@ -76,6 +84,48 @@ export function writePollState(state) {
   fs.writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   fs.renameSync(tempPath, filePath);
   return filePath;
+}
+
+function tryAcquireLock(lockPath, ensureDir) {
+  ensureDir();
+  const staleAfterMs = Number(process.env.OPENCLAW_POLL_LOCK_STALE_MS || 15 * 60 * 1000);
+  const payload = JSON.stringify({ pid: process.pid, acquired_at: new Date().toISOString() });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, `${payload}\n`, "utf8");
+      fs.closeSync(fd);
+      return lockPath;
+    } catch (error) {
+      if (error?.code !== "EEXIST") return null;
+      try {
+        const stat = fs.statSync(lockPath);
+        if (Date.now() - stat.mtimeMs > staleAfterMs) {
+          fs.rmSync(lockPath, { force: true });
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      return null;
+    }
+  }
+
+  return null;
+}
+
+export function tryAcquireBatchLock(batchId) {
+  return tryAcquireLock(batchLockPath(batchId), ensurePollStateDir);
+}
+
+export function tryAcquireTelegramPollLock(pollId) {
+  return tryAcquireLock(telegramPollLockPath(pollId), ensureTelegramPollHistoryDir);
+}
+
+export function releaseLock(lockPath) {
+  if (!lockPath) return;
+  fs.rmSync(lockPath, { force: true });
 }
 
 export function readPollStateByPath(filePath) {

@@ -27,6 +27,8 @@ const targetLib = path.join(workspaceRoot, "lifestyle-ops-lib");
 const sourceEntrypoint = path.join(repoRoot, "notion-board-ops.mjs");
 const targetEntrypoint = path.join(workspaceRoot, "lifestyle-ops.mjs");
 const targetConfig = path.join(targetLib, "config.mjs");
+const sourceBoard = process.env.BOARD_PATH || path.join(repoRoot, "board.json");
+const targetBoard = path.join(workspaceRoot, "LIFESTYLE_BOARD.json");
 const targetBoardInContainer = path.posix.join(workspaceRootInContainer, "LIFESTYLE_BOARD.json");
 const targetHistoryInContainer = path.posix.join(workspaceRootInContainer, "history");
 const openclawHostRoot = path.dirname(workspaceRoot);
@@ -83,6 +85,8 @@ export const DISABLE_BACKGROUND_SYNC = /^(1|true|yes)$/i.test(
   String(process.env.NOTION_OPS_DISABLE_BACKGROUND_SYNC || "")
 );
 
+import { nowDate } from "./util.mjs";
+
 export const TASK_FIELDS = {
   title: "Task Name",
   stage: "Stage",
@@ -119,6 +123,7 @@ export const TASK_VIEW_SPECS = {
   today: {
     aliases: ["daily", "today"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.horizon] === "today" &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
@@ -126,6 +131,7 @@ export const TASK_VIEW_SPECS = {
   week: {
     aliases: ["weekly", "week", "this_week"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.horizon] === "this week" &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
@@ -133,6 +139,7 @@ export const TASK_VIEW_SPECS = {
   month: {
     aliases: ["monthly", "month", "this_month"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.horizon] === "this month" &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
@@ -140,17 +147,19 @@ export const TASK_VIEW_SPECS = {
   year: {
     aliases: ["yearly", "year", "this_year"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.horizon] === "this year" &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
   },
   inbox: {
     aliases: ["inbox"],
-    filter: (row) => row.properties[TASK_FIELDS.stage] === "inbox"
+    filter: (row) => row.archived !== true && row.properties[TASK_FIELDS.stage] === "inbox"
   },
   blocked: {
     aliases: ["blocked"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.stage] === "blocked" &&
       row.properties[TASK_FIELDS.status] !== "done"
   },
@@ -159,8 +168,9 @@ export const TASK_VIEW_SPECS = {
     filter: (row) => {
       const dueDate = row.properties[TASK_FIELDS.dueDate]?.start || row.properties[TASK_FIELDS.dueDate];
       return (
+        row.archived !== true &&
         Boolean(dueDate) &&
-        dueDate < new Date().toISOString().slice(0, 10) &&
+        dueDate < nowDate() &&
         row.properties[TASK_FIELDS.status] !== "done" &&
         row.properties[TASK_FIELDS.stage] !== "archived"
       );
@@ -169,6 +179,7 @@ export const TASK_VIEW_SPECS = {
   needs_scheduling: {
     aliases: ["needs_scheduling"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.needsCalendar] === true &&
       !row.properties[TASK_FIELDS.calendarEventId] &&
       !row.properties[TASK_FIELDS.scheduledStart]?.start &&
@@ -179,12 +190,14 @@ export const TASK_VIEW_SPECS = {
   execution: {
     aliases: ["execution", "execution_board"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
   },
   calendar: {
     aliases: ["calendar"],
     filter: (row) =>
+      row.archived !== true &&
       Boolean(
         row.properties[TASK_FIELDS.scheduledStart]?.start ||
           row.properties[TASK_FIELDS.scheduledEnd]?.start
@@ -225,6 +238,12 @@ export function syncOpenClaw({ check = checkOnly } = {}) {
 
   if (writeFileIfChanged(targetEntrypoint, liveEntrypointText(), { check })) {
     changed.push("lifestyle-ops.mjs");
+  }
+
+  if (fs.existsSync(sourceBoard)) {
+    if (copyFileIfChanged(sourceBoard, targetBoard, { check })) {
+      changed.push("LIFESTYLE_BOARD.json");
+    }
   }
 
   const targetMirrorSync =

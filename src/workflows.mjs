@@ -58,6 +58,10 @@ async function runJsonWorkflow(action, steps) {
   });
 }
 
+async function captureSyncStep(args = {}) {
+  return captureStep("sync", cmdSync, args);
+}
+
 export async function cmdRc(args) {
   const apply = !parseBoolean(args["no-apply"], false);
   const sync = !parseBoolean(args["no-sync"], false);
@@ -80,17 +84,26 @@ export async function cmdAm(args) {
     await captureStep("refresh-manual-repeat", cmdRefreshManualRepeat, {
       date,
       ...(apply ? { apply: true } : {})
-    }),
+    })
+  ];
+  if (apply) steps.push(await captureSyncStep({}));
+  steps.push(
     await captureStep("triage-inbox", cmdTriageInbox, {
       date,
       ...(apply ? { apply: true } : {})
-    }),
+    })
+  );
+  if (apply) steps.push(await captureSyncStep({}));
+  steps.push(
     await captureStep("schedule-sweep", cmdScheduleSweep, {
       date,
       days,
       limit: args.limit || 8,
       ...(apply ? { "apply-hard-time": true } : {})
-    }),
+    })
+  );
+  if (apply) steps.push(await captureSyncStep({}));
+  steps.push(
     await captureStep("plan-day", cmdPlanDay, {
       date,
       ...(args["plan-limit"] ? { limit: args["plan-limit"] } : {})
@@ -100,7 +113,7 @@ export async function cmdAm(args) {
       days,
       limit: args["decision-limit"] || 12
     })
-  ];
+  );
   await runJsonWorkflow("morning-plan", steps);
 }
 
@@ -111,14 +124,17 @@ export async function cmdMs(args) {
   const steps = [
     await captureStep("reconcile-calendar", cmdReconcileCalendar, {
       ...(apply ? { "apply-clear-stale": true, "apply-link-matches": true } : {})
-    }),
+    })
+  ];
+  if (apply) steps.push(await captureSyncStep({}));
+  steps.push(
     await captureStep("schedule-sweep", cmdScheduleSweep, {
       date,
       days: args.days || 3,
       limit: args.limit || 8,
       ...(apply ? { "apply-hard-time": true } : {})
     })
-  ];
+  );
   if (sync) {
     steps.push(await captureStep("sync", cmdSync, { ...(args.full === true ? { full: true } : {}) }));
   }
@@ -131,6 +147,7 @@ export async function cmdPm(args) {
     date,
     ...(args["carry-to"] ? { "carry-to": args["carry-to"] } : {})
   });
+  const syncStep = await captureSyncStep({});
   const summary = await captureStep("evening-summary", cmdEveningSummary, {
     date,
     days: args.days || 3,
@@ -141,6 +158,7 @@ export async function cmdPm(args) {
       ok: true,
       action: "evening",
       close_day: closeDay.output,
+      sync: syncStep.output,
       summary: summary.output
     });
     return;
@@ -189,7 +207,7 @@ export async function cmdWk(args) {
       ...(apply ? { apply: true } : {})
     })
   ];
-  if (sync) {
+  if (apply || sync) {
     steps.push(await captureStep("sync", cmdSync, { ...(args.full === true ? { full: true } : {}) }));
   }
   steps.push(
