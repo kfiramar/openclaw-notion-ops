@@ -310,12 +310,66 @@ const COMMANDS = {
   }
 };
 
+const PREFERRED_COMMAND_ALIASES = {
+  "lifestyle-reconcile": "reconcile",
+  "daily-morning-plan": "morning-plan",
+  "daily-morning-scheduling-sweep": "morning-sweep",
+  "daily-evening-review": "evening",
+  "daily-completion-poll": "eod-poll",
+  "daily-completion-poll-watcher": "eod-watch",
+  "telegram-poll-reply-watcher": "poll-watch",
+  "weekly-overview": "weekly-review",
+  "weekly-scheduling-sweep": "weekly-sweep",
+  "life-priority-review": "priority-review",
+  "monthly-lifestyle-review": "monthly-review",
+  "yearly-lifestyle-review": "yearly-review"
+};
+
+const COMPATIBILITY_COMMAND_ALIASES = {
+  "run-lifestyle-reconcile": "reconcile",
+  "run-daily-morning-plan": "morning-plan",
+  "run-daily-morning-scheduling-sweep": "morning-sweep",
+  "run-daily-evening-review": "evening",
+  "send-daily-completion-poll": "eod-poll",
+  "process-daily-completion-poll-watcher": "eod-watch",
+  "process-telegram-poll-reply-watcher": "poll-watch",
+  "run-weekly-overview": "weekly-review",
+  "run-weekly-scheduling-sweep": "weekly-sweep",
+  "run-life-priority-review": "priority-review",
+  "run-monthly-review": "monthly-review",
+  "run-yearly-review": "yearly-review"
+};
+
+const COMMAND_ALIASES = {
+  ...PREFERRED_COMMAND_ALIASES,
+  ...COMPATIBILITY_COMMAND_ALIASES
+};
+
+for (const [alias, target] of Object.entries(COMMAND_ALIASES)) {
+  const targetSpec = COMMANDS[target];
+  if (!targetSpec) {
+    throw new Error(`missing target command for alias ${alias}: ${target}`);
+  }
+  COMMANDS[alias] = {
+    ...targetSpec,
+    help: targetSpec.help.replace(target, alias),
+    aliasFor: target
+  };
+}
+
 function printHelp(exitCode = 0) {
-  const lines = Object.entries(COMMANDS).map(([, spec]) => `  ${spec.help}`);
+  const lines = Object.entries(COMMANDS)
+    .filter(([, spec]) => !spec.aliasFor)
+    .map(([, spec]) => `  ${spec.help}`);
+  const aliasLines = Object.entries(PREFERRED_COMMAND_ALIASES)
+    .map(([alias, target]) => `  ${alias} -> ${target}`);
   console.log(`notion-board-ops
 
 Commands:
-${lines.join("\n")}`);
+${lines.join("\n")}
+
+Recommended Workflow Aliases:
+${aliasLines.join("\n")}`);
   process.exit(exitCode);
 }
 

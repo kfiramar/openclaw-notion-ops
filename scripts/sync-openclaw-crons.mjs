@@ -5,6 +5,11 @@ import { execFileSync } from "node:child_process";
 const OPENCLAW = process.env.OPENCLAW_BIN || "openclaw";
 const TELEGRAM_TO = process.env.OPENCLAW_TELEGRAM_TO || "492482728";
 const TELEGRAM_ACCOUNT = process.env.OPENCLAW_TELEGRAM_ACCOUNT || "bot4";
+const WORKSPACE_ROOT = process.env.OPENCLAW_WORKSPACE_IN_CONTAINER || "/data/.openclaw/workspace-personal";
+const LIFESTYLE_WRAPPER = `${WORKSPACE_ROOT}/lifestyle-ops.mjs`;
+const CHECK_ONLY = process.argv.includes("--check");
+const RETRY_ATTEMPTS = Math.max(1, Number(process.env.OPENCLAW_CRON_RETRY_ATTEMPTS || 4));
+const RETRY_DELAY_MS = Math.max(250, Number(process.env.OPENCLAW_CRON_RETRY_DELAY_MS || 1500));
 
 const JOBS = [
   {
@@ -15,7 +20,7 @@ const JOBS = [
     timeoutSeconds: 300,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs reconcile`. Use fresh live reads for Lifestyle Tasks, Projects, and Goals. Keep all changes inside the Lifestyle system only. Archive completed one-time tasks after logging completion if needed. Roll cadence recurring tasks forward by stamping completion, computing the next due date, resetting status, and clearing stale schedule/calendar refs. Preserve manual-repeat rows and keep their progress/window state coherent. Increment Miss Count for missed scheduled unfinished work. If Miss Count reaches 3 or more, add explicit Review Notes calling for intervention. Respect @auto-done and @no-check markers for scheduled tasks that should be treated as reliably completed. Do not send a user-facing message unless a real system problem needs escalation."
+      `Run \`node ${LIFESTYLE_WRAPPER} lifestyle-reconcile\`. Use fresh live reads for Lifestyle Tasks, Projects, and Goals. Keep all changes inside the Lifestyle system only. Archive completed one-time tasks after logging completion if needed. Roll cadence recurring tasks forward by stamping completion, computing the next due date, resetting status, and clearing stale schedule/calendar refs. Preserve manual-repeat rows and keep their progress/window state coherent. Increment Miss Count for missed scheduled unfinished work. If Miss Count reaches 3 or more, add explicit Review Notes calling for intervention. Respect @auto-done and @no-check markers for scheduled tasks that should be treated as reliably completed. Do not send a user-facing message unless a real system problem needs escalation.`
   },
   {
     name: "Lifestyle morning plan",
@@ -25,7 +30,7 @@ const JOBS = [
     timeoutSeconds: 300,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs morning-plan`. Use fresh Notion reads as needed and gog for calendar. For calendar reads here, prefer `gog calendar events suukpehoy@gmail.com --from <ISO> --to <ISO> --json`. Use one final Telegram message only. No workflow narration. Start with `Today tasks:`. Keep it short. Use double-asterisk bold for task labels. Put already-fixed calendar items under `Scheduled:` only. For tasks that still need a decision, use `(NEEDS SCHEDULING)` or `(FREE TIME)` exactly. Before inventing generic time options, prefer `preferred_slots` from the returned `scheduling-decisions`; those are the OpenViking-backed timing suggestions. Only fall back to generic options if no preferred slots exist. Do not silently place flexible work just because there is space."
+      `Run \`node ${LIFESTYLE_WRAPPER} daily-morning-plan\`. Use fresh Notion reads as needed and gog for calendar. For calendar reads here, prefer \`gog calendar events suukpehoy@gmail.com --from <ISO> --to <ISO> --json\`. Use one final Telegram message only. No workflow narration. Start with \`Today tasks:\`. Keep it short. Use double-asterisk bold for task labels. Put already-fixed calendar items under \`Scheduled:\` only. For tasks that still need a decision, use \`(NEEDS SCHEDULING)\` or \`(FREE TIME)\` exactly. Before inventing generic time options, prefer \`preferred_slots\` from the returned \`scheduling-decisions\`; those are the OpenViking-backed timing suggestions. Only fall back to generic options if no preferred slots exist. Do not silently place flexible work just because there is space.`
   },
   {
     name: "Lifestyle scheduling sweep",
@@ -35,7 +40,7 @@ const JOBS = [
     timeoutSeconds: 420,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs morning-sweep`. Auto-place only hard_time items whose intended timing is already explicit from task data. Do not auto-place flexible_block work from this cron. Only send a user-facing message if you actually fixed or moved a hard-time item, or there is a real unresolved system issue. If you send a message, keep it extremely short and action-only."
+      `Run \`node ${LIFESTYLE_WRAPPER} daily-morning-scheduling-sweep\`. Auto-place only hard_time items whose intended timing is already explicit from task data. Do not auto-place flexible_block work from this cron. Only send a user-facing message if you actually fixed or moved a hard-time item, or there is a real unresolved system issue. If you send a message, keep it extremely short and action-only.`
   },
   {
     name: "Daily overview with OpenClaw",
@@ -45,7 +50,7 @@ const JOBS = [
     timeoutSeconds: 300,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs evening`. Send Kfir exactly the stdout from that command and nothing else. Do not add any greeting, intro, explanation, summary line, or formatting changes. If the command fails, report the real failure briefly instead of improvising."
+      `Run \`node ${LIFESTYLE_WRAPPER} daily-evening-review\`. Send Kfir exactly the stdout from that command and nothing else. Do not add any greeting, intro, explanation, summary line, or formatting changes. If the command fails, report the real failure briefly instead of improvising.`
   },
   {
     name: "Lifestyle daily completion poll",
@@ -55,7 +60,7 @@ const JOBS = [
     timeoutSeconds: 180,
     thinking: "low",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs eod-poll`. Do not send any extra user-facing message from the agent. The command itself handles Telegram delivery when there are tasks that need confirmation."
+      `Run \`node ${LIFESTYLE_WRAPPER} daily-completion-poll\`. Do not send any extra user-facing message from the agent. The command itself handles Telegram delivery when there are tasks that need confirmation.`
   },
   {
     name: "Lifestyle daily completion poll watcher",
@@ -65,7 +70,7 @@ const JOBS = [
     timeoutSeconds: 120,
     thinking: "low",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs eod-watch`. Do not send any user-facing message unless the command reports a real system failure that needs escalation."
+      `Run \`node ${LIFESTYLE_WRAPPER} daily-completion-poll-watcher\`. Do not send any user-facing message unless the command reports a real system failure that needs escalation.`
   },
   {
     name: "Lifestyle telegram poll reply watcher",
@@ -75,7 +80,7 @@ const JOBS = [
     timeoutSeconds: 120,
     thinking: "low",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs poll-watch`. Do not send any user-facing message unless the command reports a real system failure that needs escalation."
+      `Run \`node ${LIFESTYLE_WRAPPER} telegram-poll-reply-watcher\`. Do not send any user-facing message unless the command reports a real system failure that needs escalation.`
   },
   {
     name: "Weekly overview with OpenClaw",
@@ -85,7 +90,7 @@ const JOBS = [
     timeoutSeconds: 420,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs weekly-review`. Use fresh Notion reads for Lifestyle Tasks, Projects, and Goals, and inspect Google Calendar for the coming week. For calendar reads here, prefer `gog calendar events suukpehoy@gmail.com --from <ISO> --to <ISO> --json`. Send one final Telegram message only. No workflow narration. Use short action-specific headings only: `Done`, `Needs attention`, `Schedule these`, `Confirm`, `Reply with`. In `Schedule these`, include only work that is actually missing future calendar coverage. For grouped-repeat work, offer exactly the missing number of future sessions, not extra optional spreads. Prefer `preferred_slots` from the returned `scheduling-decisions` before inventing fallback slots."
+      `Run \`node ${LIFESTYLE_WRAPPER} weekly-overview\`. Use fresh Notion reads for Lifestyle Tasks, Projects, and Goals, and inspect Google Calendar for the coming week. For calendar reads here, prefer \`gog calendar events suukpehoy@gmail.com --from <ISO> --to <ISO> --json\`. Send one final Telegram message only. No workflow narration. Use short action-specific headings only: \`Done\`, \`Needs attention\`, \`Schedule these\`, \`Confirm\`, \`Reply with\`. In \`Schedule these\`, include only work that is actually missing future calendar coverage. For grouped-repeat work, offer exactly the missing number of future sessions, not extra optional spreads. Prefer \`preferred_slots\` from the returned \`scheduling-decisions\` before inventing fallback slots.`
   },
   {
     name: "Lifestyle weekly scheduling sweep",
@@ -95,7 +100,7 @@ const JOBS = [
     timeoutSeconds: 420,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs weekly-sweep`. Auto-place only hard_time items whose intended timing is already explicit. Do not auto-place flexible_block work from this cron. Only send a user-facing message if you actually fixed or moved a hard-time item, or a real system issue needs escalation."
+      `Run \`node ${LIFESTYLE_WRAPPER} weekly-scheduling-sweep\`. Auto-place only hard_time items whose intended timing is already explicit. Do not auto-place flexible_block work from this cron. Only send a user-facing message if you actually fixed or moved a hard-time item, or a real system issue needs escalation.`
   },
   {
     name: "Life priority meeting with OpenClaw",
@@ -105,7 +110,7 @@ const JOBS = [
     timeoutSeconds: 300,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs priority-review`. Use fresh reads from Lifestyle Projects and Goals if needed. Send one concise Telegram check-in that names the most important real priorities, the main drift or avoidance pattern if visible, and asks what to protect this week versus consciously deprioritize. Keep it sharp and direct."
+      `Run \`node ${LIFESTYLE_WRAPPER} life-priority-review\`. Use fresh reads from Lifestyle Projects and Goals if needed. Send one concise Telegram check-in that names the most important real priorities, the main drift or avoidance pattern if visible, and asks what to protect this week versus consciously deprioritize. Keep it sharp and direct.`
   },
   {
     name: "Lifestyle monthly review",
@@ -115,7 +120,7 @@ const JOBS = [
     timeoutSeconds: 420,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs monthly-review`. Use fresh Notion reads for Lifestyle Tasks, Projects, and Goals and check the upcoming month in Google Calendar when useful. Review accomplishments, misses, carry-over, blocked items, repeated drift, project health, and goal health. Add or adjust next-month planned work only when it is grounded in current task/project state. Send one concise monthly review with the most important adjustments for the new month."
+      `Run \`node ${LIFESTYLE_WRAPPER} monthly-lifestyle-review\`. Use fresh Notion reads for Lifestyle Tasks, Projects, and Goals and check the upcoming month in Google Calendar when useful. Review accomplishments, misses, carry-over, blocked items, repeated drift, project health, and goal health. Add or adjust next-month planned work only when it is grounded in current task/project state. Send one concise monthly review with the most important adjustments for the new month.`
   },
   {
     name: "Lifestyle yearly review",
@@ -125,20 +130,67 @@ const JOBS = [
     timeoutSeconds: 420,
     thinking: "medium",
     message:
-      "Run `node /data/.openclaw/workspace-personal/lifestyle-ops.mjs yearly-review`. Use fresh Notion reads for Lifestyle Tasks, Projects, and Goals. Review the current year's goals, achievements, misses, repeated drift, and the project-level work that actually moved the year. Draft the highest-leverage direction for the next year and the first concrete projects or tasks that should follow. Send one concise yearly review only."
+      `Run \`node ${LIFESTYLE_WRAPPER} yearly-lifestyle-review\`. Use fresh Notion reads for Lifestyle Tasks, Projects, and Goals. Review the current year's goals, achievements, misses, repeated drift, and the project-level work that actually moved the year. Draft the highest-leverage direction for the next year and the first concrete projects or tasks that should follow. Send one concise yearly review only.`
   }
 ];
 
 function execOpenClaw(args) {
-  return execFileSync(OPENCLAW, args, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  });
+  let lastError = null;
+  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return execFileSync(OPENCLAW, args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableGatewayError(error) || attempt >= RETRY_ATTEMPTS) {
+        throw error;
+      }
+      sleep(RETRY_DELAY_MS * attempt);
+    }
+  }
+  throw lastError;
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function isRetryableGatewayError(error) {
+  const text = String(error?.stderr || error?.stdout || error?.message || "");
+  return (
+    text.includes("gateway connect failed") ||
+    text.includes("connect challenge timeout") ||
+    text.includes("gateway not connected") ||
+    text.includes("gateway closed")
+  );
 }
 
 function listJobs() {
   const stdout = execOpenClaw(["cron", "list", "--json"]);
   return JSON.parse(stdout).jobs || [];
+}
+
+function checkJobs(existingJobs) {
+  const desiredNames = new Set(JOBS.map((job) => job.name));
+  const existingByName = new Map(existingJobs.map((job) => [job.name, job]));
+  const missing = JOBS.filter((job) => !existingByName.has(job.name)).map((job) => job.name);
+  const disabled = JOBS.filter((job) => existingByName.get(job.name)?.enabled === false).map((job) => job.name);
+  const unexpected = existingJobs
+    .filter((job) => !desiredNames.has(job.name))
+    .filter((job) => String(job.name || "").includes("Lifestyle") || String(job.name || "").includes("OpenClaw"))
+    .map((job) => ({ id: job.id, name: job.name }));
+
+  return {
+    ok: missing.length === 0 && disabled.length === 0 && unexpected.length === 0,
+    action: "check-crons",
+    missing,
+    disabled,
+    unexpected,
+    expected_total: JOBS.length,
+    actual_total: existingJobs.length
+  };
 }
 
 function deliveryArgs(job) {
@@ -183,7 +235,27 @@ function upsertArgs(job) {
 }
 
 function main() {
-  const existingJobs = new Map(listJobs().map((job) => [job.name, job]));
+  let allJobs;
+  try {
+    allJobs = listJobs();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(JSON.stringify({
+      ok: false,
+      action: CHECK_ONLY ? "check-crons" : "sync-crons",
+      error: message
+    }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
+  if (CHECK_ONLY) {
+    const result = checkJobs(allJobs);
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  const existingJobs = new Map(allJobs.map((job) => [job.name, job]));
   const updated = [];
   const created = [];
 

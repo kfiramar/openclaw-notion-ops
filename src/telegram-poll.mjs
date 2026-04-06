@@ -2,12 +2,14 @@ import { TELEGRAM_POLL_ACCOUNT, TELEGRAM_POLL_TARGET } from "./config.mjs";
 import {
   listTelegramPollMetadata,
   normalizeAccountId,
+  releaseLock,
   readLatestTelegramPollMetadata,
   readPollAnswerEvents,
   readTelegramPollMetadata,
+  tryAcquireTelegramPollLock,
   writeTelegramPollMetadata
 } from "./polls.mjs";
-import { sendTelegramMessage, sendTelegramPoll } from "./telegram.mjs";
+import { sendTelegramMessage, sendTelegramPoll, stopTelegramPoll } from "./telegram.mjs";
 
 function emitJson(payload) {
   console.log(JSON.stringify(payload, null, 2));
@@ -115,7 +117,16 @@ export async function cmdSendTelegramPoll(args) {
     last_notified_at: null,
     last_notified_option_ids: []
   };
-  writeTelegramPollMetadata(metadata);
+  try {
+    writeTelegramPollMetadata(metadata);
+  } catch (error) {
+    await stopTelegramPoll({
+      accountId,
+      chatId: sent.chat_id,
+      messageId: sent.message_id
+    }).catch(() => null);
+    throw error;
+  }
   emitJson({ ok: true, action: "send-telegram-poll", ...metadata });
 }
 
@@ -139,41 +150,56 @@ export async function cmdProcessTelegramPollReplies(args) {
 
   const processed = [];
   for (const metadata of metadataRows) {
-    const answer = latestByPollId(metadata.account_id, metadata.poll_id);
-    if (!answer) {
-      processed.push({ poll_id: metadata.poll_id, status: "pending_answer" });
+    const lockPath = tryAcquireTelegramPollLock(metadata.poll_id);
+    if (!lockPath) {
+      processed.push({ poll_id: metadata.poll_id, status: "locked" });
       continue;
     }
-    const optionIds = normalizeOptionIds(answer.option_ids);
-    const prior = normalizeOptionIds(metadata.last_notified_option_ids);
-    const unchanged =
-      optionIds.length === prior.length &&
-      optionIds.every((value, index) => value === prior[index]);
-    if (unchanged) {
-      processed.push({ poll_id: metadata.poll_id, status: "already_notified", option_ids: optionIds });
-      continue;
+    try {
+      const answer = latestByPollId(metadata.account_id, metadata.poll_id);
+      if (!answer) {
+        processed.push({ poll_id: metadata.poll_id, status: "pending_answer" });
+        continue;
+      }
+      const optionIds = normalizeOptionIds(answer.option_ids);
+      const prior = normalizeOptionIds(metadata.last_notified_option_ids);
+      const unchanged =
+        optionIds.length === prior.length &&
+        optionIds.every((value, index) => value === prior[index]);
+      if (unchanged) {
+        processed.push({ poll_id: metadata.poll_id, status: "already_notified", option_ids: optionIds });
+        continue;
+      }
+
+      const summary = selectionSummary(metadata, answer);
+      await sendTelegramMessage({
+        accountId: metadata.account_id,
+        chatId: metadata.chat_id,
+        text: notificationText(summary)
+      });
+
+      const nextMetadata = {
+        ...metadata,
+        last_notified_at: new Date().toISOString(),
+        last_notified_option_ids: optionIds
+      };
+      writeTelegramPollMetadata(nextMetadata);
+
+      processed.push({
+        poll_id: metadata.poll_id,
+        status: "notified",
+        option_ids: optionIds,
+        selected_labels: summary.selected_labels
+      });
+    } catch (error) {
+      processed.push({
+        poll_id: metadata.poll_id,
+        status: "error",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      releaseLock(lockPath);
     }
-
-    const summary = selectionSummary(metadata, answer);
-    await sendTelegramMessage({
-      accountId: metadata.account_id,
-      chatId: metadata.chat_id,
-      text: notificationText(summary)
-    });
-
-    const nextMetadata = {
-      ...metadata,
-      last_notified_at: new Date().toISOString(),
-      last_notified_option_ids: optionIds
-    };
-    writeTelegramPollMetadata(nextMetadata);
-
-    processed.push({
-      poll_id: metadata.poll_id,
-      status: "notified",
-      option_ids: optionIds,
-      selected_labels: summary.selected_labels
-    });
   }
 
   emitJson({

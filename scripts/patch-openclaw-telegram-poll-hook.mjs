@@ -35,6 +35,7 @@ const injection = `bot.use(async (ctx, next) => {
 \t\t\t}
 \t\t} catch (err) {
 \t\t\truntime.error?.(danger(\`[telegram] poll_answer handler failed: \${String(err)}\`));
+\t\t\tthrow err;
 \t\t}
 \t\tawait next();
 \t});

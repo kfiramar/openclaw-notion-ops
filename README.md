@@ -180,19 +180,44 @@ Core commands:
 
 Maintenance commands:
 
-- short cron workflow commands:
-  - `reconcile` reconcile + sync
-  - `morning-plan` morning-plan workflow
-  - `morning-sweep` morning scheduling sweep
-  - `evening` close-day + evening summary
-  - `eod-poll` send daily completion poll
-  - `eod-watch` process daily completion poll watcher
-  - `poll-watch` process generic Telegram poll reply watcher
-  - `weekly-review` weekly overview prep
-  - `weekly-sweep` weekly scheduling sweep
-  - `priority-review` life-priority prep
-  - `monthly-review` monthly review prep
-  - `yearly-review` yearly review prep
+- recommended workflow commands:
+  - `lifestyle-reconcile` reconcile + sync
+  - `daily-morning-plan` morning planning workflow
+  - `daily-morning-scheduling-sweep` morning hard-time scheduling sweep
+  - `daily-evening-review` close-day + evening summary
+  - `daily-completion-poll` send daily completion poll
+  - `daily-completion-poll-watcher` process daily completion poll watcher
+  - `telegram-poll-reply-watcher` process generic Telegram poll reply watcher
+  - `weekly-overview` weekly overview prep
+  - `weekly-scheduling-sweep` weekly scheduling sweep
+  - `life-priority-review` life-priority prep
+  - `monthly-lifestyle-review` monthly review prep
+  - `yearly-lifestyle-review` yearly review prep
+- older aliases still supported:
+  - `reconcile`
+  - `morning-plan`
+  - `morning-sweep`
+  - `evening`
+  - `eod-poll`
+  - `eod-watch`
+  - `poll-watch`
+  - `weekly-review`
+  - `weekly-sweep`
+  - `priority-review`
+  - `monthly-review`
+  - `yearly-review`
+  - `run-lifestyle-reconcile`
+  - `run-daily-morning-plan`
+  - `run-daily-morning-scheduling-sweep`
+  - `run-daily-evening-review`
+  - `send-daily-completion-poll`
+  - `process-daily-completion-poll-watcher`
+  - `process-telegram-poll-reply-watcher`
+  - `run-weekly-overview`
+  - `run-weekly-scheduling-sweep`
+  - `run-life-priority-review`
+  - `run-monthly-review`
+  - `run-yearly-review`
 - `show-completed [--date today|YYYY-MM-DD]`
 - `evening-summary [--date today|YYYY-MM-DD] [--days N] [--task-limit N]`
 - `close-day [--date YYYY-MM-DD] [--carry-to this week|this month|this year]`

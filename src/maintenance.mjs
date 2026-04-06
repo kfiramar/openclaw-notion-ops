@@ -34,7 +34,18 @@ function normalizedInstant(value) {
 }
 
 function deleteCalendarRefs(task) {
-  const refs = calendarRefsOf(task);
+  return deleteCalendarRefList(calendarRefSnapshot(task));
+}
+
+function calendarRefSnapshot(task) {
+  return calendarRefsOf(task).map((ref) => ({
+    event_id: ref.event_id,
+    start: ref.start || null,
+    end: ref.end || null
+  }));
+}
+
+function deleteCalendarRefList(refs) {
   for (const ref of refs) {
     if (ref.event_id) deleteCalendarEvent(ref.event_id);
   }
@@ -455,18 +466,11 @@ function recurringDatesForEvent(event, validDates) {
 function scheduledOccurrenceDates(task, validDates) {
   const valid = new Set(validDates);
   const dates = new Set();
+  const refs = calendarRefsOf(task);
   const scheduledStart = dateStart(task.properties[TASK_FIELDS.scheduledStart]);
-  if (scheduledStart) {
+  if (scheduledStart && refs.length === 0) {
     const day = scheduledStart.slice(0, 10);
     if (valid.has(day)) dates.add(day);
-  }
-
-  const refs = calendarRefsOf(task);
-  for (const ref of refs) {
-    if (ref.start) {
-      const day = ref.start.slice(0, 10);
-      if (valid.has(day)) dates.add(day);
-    }
   }
 
   for (const ref of refs) {
@@ -485,6 +489,12 @@ function scheduledOccurrenceDates(task, validDates) {
   }
 
   return Array.from(dates).sort();
+}
+
+function assertCalendarLookup(calendarLookup, date, context) {
+  if (calendarLookup.ok) return;
+  const detail = calendarLookup.stderr || calendarLookup.stdout || "calendar lookup failed";
+  throw new Error(`${context} failed for ${date}: ${detail}`);
 }
 
 function countBy(items, keyFn) {
@@ -530,14 +540,16 @@ function hardTimeWindowFromTask(task) {
 function hardTimeProposal(task, dateWindow, fallbackDate) {
   const window = hardTimeWindowFromTask(task);
   if (!window) return null;
+  const allowedDates = dateWindow.filter((day) => weekdayAllowed(task, day));
+  if (allowedDates.length === 0) return null;
   const dueDate = dateStart(task.properties[TASK_FIELDS.dueDate]);
   const targetDate =
-    dueDate && dateWindow.includes(dueDate)
+    dueDate && allowedDates.includes(dueDate)
       ? dueDate
-      : task.properties[TASK_FIELDS.horizon] === "today"
+      : task.properties[TASK_FIELDS.horizon] === "today" && fallbackDate && allowedDates.includes(fallbackDate)
         ? fallbackDate
-        : dateWindow[0] || fallbackDate;
-  if (!targetDate || !dateWindow.includes(targetDate)) return null;
+        : allowedDates[0] || null;
+  if (!targetDate || !allowedDates.includes(targetDate)) return null;
   return {
     page_id: task.id,
     title: task.title,
@@ -562,7 +574,7 @@ function autoCompleteScheduledTask(task, date) {
   const repeatProgress = Number(task.properties[TASK_FIELDS.repeatProgress] || 0);
 
   if (repeatMode === "cadence" && cadence && cadence !== "none") {
-    deleteCalendarRefs(task);
+    const refs = calendarRefSnapshot(task);
     const next = plusCadence(date, cadence);
     logCompletion(task, {
       completed_at: date,
@@ -579,6 +591,7 @@ function autoCompleteScheduledTask(task, date) {
       [TASK_FIELDS.stage]: selectProperty("active"),
       ...clearCalendarProperties()
     });
+    deleteCalendarRefList(refs);
     return {
       page_id: task.id,
       title: task.title,
@@ -588,7 +601,7 @@ function autoCompleteScheduledTask(task, date) {
   }
 
   if (repeatMode === "manual_repeat") {
-    deleteCalendarRefs(task);
+    const refs = calendarRefSnapshot(task);
     if (repeatTargetCount > 0) {
       const nextProgress = Math.min(repeatTargetCount, repeatProgress + 1);
       const reachedTarget = nextProgress >= repeatTargetCount;
@@ -606,6 +619,7 @@ function autoCompleteScheduledTask(task, date) {
         [TASK_FIELDS.stage]: selectProperty(reachedTarget ? "done" : task.properties[TASK_FIELDS.stage] || "active"),
         ...clearCalendarProperties()
       });
+      deleteCalendarRefList(refs);
       return {
         page_id: task.id,
         title: task.title,
@@ -627,6 +641,7 @@ function autoCompleteScheduledTask(task, date) {
       [TASK_FIELDS.nextDueAt]: dateProperty(null),
       ...clearCalendarProperties()
     });
+    deleteCalendarRefList(refs);
     return {
       page_id: task.id,
       title: task.title,
@@ -639,8 +654,12 @@ function autoCompleteScheduledTask(task, date) {
     mode: "close-day-auto-archive-done",
     source: "close-day"
   });
-  deleteCalendarRefs(task);
+  const refs = calendarRefSnapshot(task);
+  updatePageProperties(task.id, {
+    ...clearCalendarProperties()
+  });
   archivePage(task.id);
+  deleteCalendarRefList(refs);
   return {
     page_id: task.id,
     title: task.title,
@@ -679,13 +698,12 @@ function buildOccupiedByDate(tasks, dateWindow) {
     const from = isoLocal(day, 0);
     const to = isoLocal(day, 23 * 60 + 59);
     const calendarLookup = fetchCalendarEventsInRange(from, to);
+    assertCalendarLookup(calendarLookup, day, "calendar availability lookup");
     const intervals = [];
-    if (calendarLookup.ok) {
-      for (const event of calendarLookup.events || []) {
-        if (event.status === "cancelled") continue;
-        const interval = eventIntervalForDate(event, day);
-        if (interval) intervals.push(interval);
-      }
+    for (const event of calendarLookup.events || []) {
+      if (event.status === "cancelled") continue;
+      const interval = eventIntervalForDate(event, day);
+      if (interval) intervals.push(interval);
     }
     for (const task of tasks) {
       const interval = taskIntervalForDate(task, day);
@@ -732,6 +750,7 @@ function hardTimeSlotsForTask(task, validDates, occupiedByDate, count) {
   if (!window) return [];
   const slots = [];
   for (const day of validDates) {
+    if (!weekdayAllowed(task, day)) continue;
     if (slots.length >= count) break;
     const interval = [window.startMinutes, window.endMinutes];
     const occupied = occupiedByDate.get(day) || [];
@@ -1005,7 +1024,7 @@ export function cmdRefreshManualRepeat(args) {
   const refreshed = [];
   if (apply) {
     for (const item of candidates) {
-      deleteCalendarRefs(item.task);
+      const refs = calendarRefSnapshot(item.task);
       updatePageProperties(item.task.id, {
         [TASK_FIELDS.dueDate]: dateProperty(item.proposal.next_due),
         [TASK_FIELDS.nextDueAt]: dateProperty(item.proposal.next_due),
@@ -1015,6 +1034,7 @@ export function cmdRefreshManualRepeat(args) {
         [TASK_FIELDS.status]: selectProperty("todo"),
         ...clearCalendarProperties()
       });
+      deleteCalendarRefList(refs);
       refreshed.push(item.proposal);
     }
   }
@@ -1067,7 +1087,7 @@ export function cmdCloseDay(args) {
 
     if (isDoneTask(task)) {
       if (repeatMode === "cadence" && cadence && cadence !== "none") {
-        deleteCalendarRefs(task);
+        const refs = calendarRefSnapshot(task);
         const next = plusCadence(date, cadence);
         logCompletion(task, {
           completed_at: date,
@@ -1084,12 +1104,13 @@ export function cmdCloseDay(args) {
           [TASK_FIELDS.stage]: selectProperty("active"),
           ...clearCalendarProperties()
         });
+        deleteCalendarRefList(refs);
         rolledRecurring.push({ page_id: task.id, title: task.title, next_due: next });
         continue;
       }
 
       if (repeatMode === "manual_repeat") {
-        deleteCalendarRefs(task);
+        const refs = calendarRefSnapshot(task);
         const patch = {
           ...clearCalendarProperties(),
           [TASK_FIELDS.nextDueAt]: dateProperty(null)
@@ -1098,6 +1119,7 @@ export function cmdCloseDay(args) {
           patch[TASK_FIELDS.lastCompletedAt] = dateProperty(date);
         }
         updatePageProperties(task.id, patch);
+        deleteCalendarRefList(refs);
         preservedManualRepeat.push({ page_id: task.id, title: task.title });
         continue;
       }
@@ -1107,8 +1129,12 @@ export function cmdCloseDay(args) {
         mode: "close-day-archive-done",
         source: "close-day"
       });
-      deleteCalendarRefs(task);
+      const refs = calendarRefSnapshot(task);
+      updatePageProperties(task.id, {
+        ...clearCalendarProperties()
+      });
       archivePage(task.id);
+      deleteCalendarRefList(refs);
       archivedOneTime.push({ page_id: task.id, title: task.title });
       continue;
     }
@@ -1124,8 +1150,9 @@ export function cmdCloseDay(args) {
         Boolean(dateStart(task.properties[TASK_FIELDS.scheduledStart])) ||
         Boolean(dateStart(task.properties[TASK_FIELDS.scheduledEnd])) ||
         calendarRefsOf(task).length > 0;
-      if (hadCalendarState) deleteCalendarRefs(task);
+      const refs = hadCalendarState ? calendarRefSnapshot(task) : [];
       updatePageProperties(task.id, carryForwardProperties(carryTo, nextMissCount));
+      if (hadCalendarState) deleteCalendarRefList(refs);
       carriedForward.push({
         page_id: task.id,
         title: task.title,
@@ -1305,57 +1332,63 @@ export function cmdReconcileCalendar(args) {
         cleared.push({ page_id: task.id, title: task.title, reason: "done-or-archived-with-event-ref" });
       }
     }
-    if (eventId && status !== "done" && !archived) {
-      const lookup = fetchCalendarEvent(eventId);
-      if (!lookup.ok) {
-        if (lookup.notFound) {
-          missingExternalEvent.push({
-            ...base,
-            calendar_event_id: eventId
-          });
-          if (applyClearStale) {
-            updatePageProperties(task.id, clearCalendarProperties());
-            cleared.push({ page_id: task.id, title: task.title, reason: "missing-external-event" });
+    if (refs.length > 0 && status !== "done" && !archived) {
+      let shouldClearTask = false;
+      for (const ref of refs) {
+        if (!ref.event_id) continue;
+        const lookup = fetchCalendarEvent(ref.event_id);
+        if (!lookup.ok) {
+          if (lookup.notFound) {
+            missingExternalEvent.push({
+              ...base,
+              calendar_event_id: ref.event_id
+            });
+            shouldClearTask = true;
+          } else {
+            externalLookupErrors.push({
+              ...base,
+              calendar_event_id: ref.event_id,
+              error_status: lookup.status,
+              error: lookup.stderr || lookup.stdout || "calendar lookup failed"
+            });
           }
-        } else {
-          externalLookupErrors.push({
-            ...base,
-            calendar_event_id: eventId,
-            error_status: lookup.status,
-            error: lookup.stderr || lookup.stdout || "calendar lookup failed"
-          });
+          continue;
         }
-      } else {
+
         const event = lookup.event || {};
         const eventStatus = event.status || null;
         const eventStart = normalizedInstant(event.start?.dateTime || event.start?.date || null);
         const eventEnd = normalizedInstant(event.end?.dateTime || event.end?.date || null);
-        const notionStart = normalizedInstant(scheduledStart);
-        const notionEnd = normalizedInstant(scheduledEnd);
+        const notionStart = normalizedInstant(ref.start || scheduledStart);
+        const notionEnd = normalizedInstant(ref.end || scheduledEnd);
 
         if (eventStatus === "cancelled") {
           cancelledExternalEvent.push({
             ...base,
-            calendar_event_id: eventId
+            calendar_event_id: ref.event_id
           });
-          if (applyClearStale) {
-            updatePageProperties(task.id, clearCalendarProperties());
-            cleared.push({ page_id: task.id, title: task.title, reason: "cancelled-external-event" });
-          }
-        } else if (
+          shouldClearTask = true;
+          continue;
+        }
+
+        if (
           (notionStart && eventStart && notionStart !== eventStart) ||
           (notionEnd && eventEnd && notionEnd !== eventEnd)
         ) {
           scheduleDrift.push({
             ...base,
-            calendar_event_id: eventId,
-            notion_start: scheduledStart || null,
-            notion_end: scheduledEnd || null,
+            calendar_event_id: ref.event_id,
+            notion_start: ref.start || scheduledStart || null,
+            notion_end: ref.end || scheduledEnd || null,
             calendar_start: event.start?.dateTime || event.start?.date || null,
             calendar_end: event.end?.dateTime || event.end?.date || null,
             calendar_summary: event.summary || null
           });
         }
+      }
+      if (applyClearStale && shouldClearTask) {
+        updatePageProperties(task.id, clearCalendarProperties());
+        cleared.push({ page_id: task.id, title: task.title, reason: "missing-or-cancelled-external-event" });
       }
     }
     if (scheduledStart && scheduledEnd && Date.parse(scheduledEnd) < Date.parse(scheduledStart)) {
@@ -1877,13 +1910,12 @@ export function cmdScheduleSweep(args) {
     const from = isoLocal(day, 0);
     const to = isoLocal(day, 23 * 60 + 59);
     const calendarLookup = fetchCalendarEventsInRange(from, to);
+    assertCalendarLookup(calendarLookup, day, "calendar availability lookup");
     const intervals = [];
-    if (calendarLookup.ok) {
-      for (const event of calendarLookup.events || []) {
-        if (event.status === "cancelled") continue;
-        const interval = eventIntervalForDate(event, day);
-        if (interval) intervals.push(interval);
-      }
+    for (const event of calendarLookup.events || []) {
+      if (event.status === "cancelled") continue;
+      const interval = eventIntervalForDate(event, day);
+      if (interval) intervals.push(interval);
     }
     for (const task of tasks) {
       const interval = taskIntervalForDate(task, day);
@@ -1934,6 +1966,14 @@ export function cmdScheduleSweep(args) {
       proposals.push(proposal);
 
       if (applyHardTime) {
+        const hardSlots = hardTimeSlotsForTask(task, [proposal.date], occupiedByDate, 1);
+        if (hardSlots.length === 0) {
+          skipped.push({
+            ...taskReviewShape(task),
+            reason: "conflicts-with-existing-calendar"
+          });
+          continue;
+        }
         const event = createCalendarEvent(task.title, proposal.start, proposal.end);
         updatePageProperties(task.id, {
           [TASK_FIELDS.scheduledStart]: dateProperty(proposal.start),
@@ -2001,19 +2041,11 @@ export function cmdScheduleSweep(args) {
     proposals.push(proposal);
 
     if (apply) {
-      const event = createCalendarEvent(task.title, proposal.start, proposal.end);
-      updatePageProperties(task.id, {
-        [TASK_FIELDS.scheduledStart]: dateProperty(proposal.start),
-        [TASK_FIELDS.scheduledEnd]: dateProperty(proposal.end),
-        [TASK_FIELDS.calendarEventId]: richTextProperty(event.id),
-        [TASK_FIELDS.status]: selectProperty("scheduled"),
-        [TASK_FIELDS.stage]: selectProperty("active"),
-        [TASK_FIELDS.scheduleType]: selectProperty(task.properties[TASK_FIELDS.scheduleType] || "soft")
+      skipped.push({
+        ...taskReviewShape(task),
+        reason: "flexible-auto-placement-disabled"
       });
-      scheduled.push({
-        ...proposal,
-        calendar_event_id: event.id
-      });
+      continue;
     }
   }
 
@@ -2036,9 +2068,9 @@ export function cmdScheduleSweep(args) {
     scheduled,
     skipped,
     notes: [
-      "schedule-sweep only auto-places tasks that are safe to place heuristically",
+      "schedule-sweep only auto-places hard_time tasks when calendar availability is confirmed",
       "routine_window tasks remain visible in needs_scheduling until explicit timing rules are set",
-      "hard_time tasks can be auto-placed when apply-hard-time is set and a clear clock range is already stored on the task"
+      "flexible_block tasks remain proposal-only and require an explicit human decision path"
     ]
   }, null, 2));
 }

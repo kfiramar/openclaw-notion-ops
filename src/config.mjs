@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { nowDate } from "./util.mjs";
+
 const CWD = process.cwd();
 
 export const CONTAINER = process.env.OPENCLAW_CONTAINER || "openclaw-pma3-openclaw-1";
@@ -59,6 +61,7 @@ export const TASK_VIEW_SPECS = {
   today: {
     aliases: ["daily", "today"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.horizon] === "today" &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
@@ -66,6 +69,7 @@ export const TASK_VIEW_SPECS = {
   week: {
     aliases: ["weekly", "week", "this_week"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.horizon] === "this week" &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
@@ -73,6 +77,7 @@ export const TASK_VIEW_SPECS = {
   month: {
     aliases: ["monthly", "month", "this_month"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.horizon] === "this month" &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
@@ -80,17 +85,19 @@ export const TASK_VIEW_SPECS = {
   year: {
     aliases: ["yearly", "year", "this_year"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.horizon] === "this year" &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
   },
   inbox: {
     aliases: ["inbox"],
-    filter: (row) => row.properties[TASK_FIELDS.stage] === "inbox"
+    filter: (row) => row.archived !== true && row.properties[TASK_FIELDS.stage] === "inbox"
   },
   blocked: {
     aliases: ["blocked"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.stage] === "blocked" &&
       row.properties[TASK_FIELDS.status] !== "done"
   },
@@ -99,8 +106,9 @@ export const TASK_VIEW_SPECS = {
     filter: (row) => {
       const dueDate = row.properties[TASK_FIELDS.dueDate]?.start || row.properties[TASK_FIELDS.dueDate];
       return (
+        row.archived !== true &&
         Boolean(dueDate) &&
-        dueDate < new Date().toISOString().slice(0, 10) &&
+        dueDate < nowDate() &&
         row.properties[TASK_FIELDS.status] !== "done" &&
         row.properties[TASK_FIELDS.stage] !== "archived"
       );
@@ -109,6 +117,7 @@ export const TASK_VIEW_SPECS = {
   needs_scheduling: {
     aliases: ["needs_scheduling"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.needsCalendar] === true &&
       !row.properties[TASK_FIELDS.calendarEventId] &&
       !row.properties[TASK_FIELDS.scheduledStart]?.start &&
@@ -119,12 +128,14 @@ export const TASK_VIEW_SPECS = {
   execution: {
     aliases: ["execution", "execution_board"],
     filter: (row) =>
+      row.archived !== true &&
       row.properties[TASK_FIELDS.status] !== "done" &&
       row.properties[TASK_FIELDS.stage] !== "archived"
   },
   calendar: {
     aliases: ["calendar"],
     filter: (row) =>
+      row.archived !== true &&
       Boolean(
         row.properties[TASK_FIELDS.scheduledStart]?.start ||
           row.properties[TASK_FIELDS.scheduledEnd]?.start

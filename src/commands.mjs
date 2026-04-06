@@ -107,7 +107,18 @@ function normalizedInstant(value) {
 }
 
 function deleteCalendarRefs(task) {
-  const refs = calendarRefsOf(task);
+  return deleteCalendarRefList(calendarRefSnapshot(task));
+}
+
+function calendarRefSnapshot(task) {
+  return calendarRefsOf(task).map((ref) => ({
+    event_id: ref.event_id,
+    start: ref.start || null,
+    end: ref.end || null
+  }));
+}
+
+function deleteCalendarRefList(refs) {
   for (const ref of refs) {
     if (ref.event_id) deleteCalendarEvent(ref.event_id);
   }
@@ -974,7 +985,7 @@ export function cmdDefer(args) {
   const nextStatus =
     args.status ||
     (targetStage === "blocked" ? "blocked" : "todo");
-  if (!keepSchedule) deleteCalendarRefs(task);
+  const refs = !keepSchedule ? calendarRefSnapshot(task) : [];
 
   updatePageProperties(task.id, {
     [TASK_FIELDS.horizon]: selectProperty(to),
@@ -984,6 +995,7 @@ export function cmdDefer(args) {
     [TASK_FIELDS.missCount]: nextMissCount === null ? undefined : numberProperty(nextMissCount),
     ...(keepSchedule ? {} : clearCalendarProperties())
   });
+  if (!keepSchedule) deleteCalendarRefList(refs);
 
   console.log(JSON.stringify({
     ok: true,
@@ -1020,10 +1032,9 @@ export function cmdCompleteTask(args) {
   const repeatMode = repeatModeOf(task);
   const repeatTargetCount = Number(task.properties[TASK_FIELDS.repeatTargetCount] || 0);
   const repeatProgress = Number(task.properties[TASK_FIELDS.repeatProgress] || 0);
-  const refs = calendarRefsOf(task);
+  const refs = calendarRefSnapshot(task);
 
   if (repeatMode === "cadence" && cadence && cadence !== "none") {
-    deleteCalendarRefs(task);
     const next = plusCadence(when, cadence);
     logCompletion(task, {
       completed_at: when,
@@ -1042,13 +1053,13 @@ export function cmdCompleteTask(args) {
       [TASK_FIELDS.scheduledEnd]: dateProperty(null),
       [TASK_FIELDS.calendarEventId]: richTextProperty("")
     });
+    deleteCalendarRefList(refs);
     console.log(JSON.stringify({ ok: true, action: "complete-task", mode: "recurring-roll-forward", task: task.title, next_due: next }, null, 2));
     return;
   }
 
   if (repeatMode === "manual_repeat") {
     if (repeatTargetCount > 0) {
-      deleteCalendarRefs(task);
       const nextProgress = Math.min(repeatTargetCount, repeatProgress + 1);
       const reachedTarget = nextProgress >= repeatTargetCount;
       logCompletion(task, {
@@ -1065,6 +1076,7 @@ export function cmdCompleteTask(args) {
         [TASK_FIELDS.stage]: selectProperty(reachedTarget ? "done" : task.properties[TASK_FIELDS.stage] || "active"),
         ...clearCalendarProperties()
       });
+      deleteCalendarRefList(refs);
       console.log(JSON.stringify({
         ok: true,
         action: "complete-task",
@@ -1082,7 +1094,6 @@ export function cmdCompleteTask(args) {
       mode: "manual-repeat-done",
       source: "complete-task"
     });
-    deleteCalendarRefs(task);
     updatePageProperties(task.id, {
       [TASK_FIELDS.status]: selectProperty("done"),
       [TASK_FIELDS.stage]: selectProperty("done"),
@@ -1090,6 +1101,7 @@ export function cmdCompleteTask(args) {
       [TASK_FIELDS.nextDueAt]: dateProperty(null),
       ...clearCalendarProperties()
     });
+    deleteCalendarRefList(refs);
     console.log(JSON.stringify({
       ok: true,
       action: "complete-task",
@@ -1107,8 +1119,11 @@ export function cmdCompleteTask(args) {
       mode: "archived",
       source: "complete-task"
     });
-    deleteCalendarRefs(task);
+    updatePageProperties(task.id, {
+      ...clearCalendarProperties()
+    });
     archivePage(task.id);
+    deleteCalendarRefList(refs);
     console.log(JSON.stringify({ ok: true, action: "complete-task", mode: "archived", page_id: task.id, task: task.title }, null, 2));
     return;
   }
@@ -1118,12 +1133,13 @@ export function cmdCompleteTask(args) {
     mode: "done",
     source: "complete-task"
   });
-  deleteCalendarRefs(task);
   updatePageProperties(task.id, {
     [TASK_FIELDS.status]: selectProperty("done"),
     [TASK_FIELDS.stage]: selectProperty("done"),
-    [TASK_FIELDS.lastCompletedAt]: dateProperty(when)
+    [TASK_FIELDS.lastCompletedAt]: dateProperty(when),
+    ...clearCalendarProperties()
   });
+  deleteCalendarRefList(refs);
   console.log(JSON.stringify({ ok: true, action: "complete-task", mode: "done", page_id: task.id, task: task.title }, null, 2));
 }
 
@@ -1136,8 +1152,12 @@ export function cmdArchiveTask(args) {
   const archived = [];
 
   for (const task of tasks) {
-    const refs = deleteCalendarRefs(task);
+    const refs = calendarRefSnapshot(task);
+    updatePageProperties(task.id, {
+      ...clearCalendarProperties()
+    });
     archivePage(task.id);
+    deleteCalendarRefList(refs);
     archived.push({
       page_id: task.id,
       task: task.title,
@@ -1180,7 +1200,7 @@ export function cmdDeleteTask(args) {
       throw new Error("delete-task only deletes non-recurring one-time tasks; use remove-schedule for calendar cleanup or pass --allow-recurring explicitly");
     }
 
-    const refs = deleteCalendarRefs(task);
+    const refs = calendarRefSnapshot(task);
     const eventId = refs[0]?.event_id || "";
     if (task.properties[TASK_FIELDS.calendarEventId] || task.properties[TASK_FIELDS.scheduledStart] || task.properties[TASK_FIELDS.scheduledEnd]) {
       const clearedTask = {
@@ -1199,6 +1219,7 @@ export function cmdDeleteTask(args) {
       });
     }
     archivePage(task.id);
+    deleteCalendarRefList(refs);
 
     const result = {
       page_id: task.id,
@@ -1420,13 +1441,12 @@ export function cmdRemoveSchedule(args) {
       }
     };
 
-    deleteCalendarRefs(task);
-
     updatePageProperties(task.id, {
       ...clearCalendarProperties(),
       [TASK_FIELDS.status]: selectProperty(args.status || "todo"),
       [TASK_FIELDS.stage]: selectProperty(args.stage || defaultStageForTask(clearedTask))
     });
+    deleteCalendarRefList(refs);
 
     removed.push({
       page_id: task.id,

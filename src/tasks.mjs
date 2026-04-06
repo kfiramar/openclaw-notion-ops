@@ -672,6 +672,7 @@ export function listRows(kind, fields) {
 export function carryForwardProperties(carryTo, missCount) {
   return {
     [TASK_FIELDS.horizon]: selectProperty(carryTo),
+    [TASK_FIELDS.status]: selectProperty("todo"),
     [TASK_FIELDS.stage]: selectProperty("planned"),
     [TASK_FIELDS.missCount]: numberProperty(missCount),
     ...clearCalendarProperties()
